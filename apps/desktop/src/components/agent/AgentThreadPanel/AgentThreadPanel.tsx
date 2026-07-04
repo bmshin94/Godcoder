@@ -175,7 +175,12 @@ export default function AgentThreadPanel() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [thread?.messages.length, streaming?.textBuffer, thread?.total_additions, thread?.total_deletions]);
+  }, [thread?.messages.length, thread?.total_additions, thread?.total_deletions]);
+
+  useEffect(() => {
+    if (!streaming?.textBuffer) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [streaming?.textBuffer]);
 
   // Load checkpoints when the thread opens.
   useEffect(() => {

@@ -3,7 +3,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAppStore } from "@/store";
 import { createInitialStreamingState } from "@/store/agentSlice";
 import { agentTauriService } from "@/services/agentTauriService";
-import { parseThinkingMarkers, buildAgentMessage, buildThinkingMeta, displayToAgentMessage } from "@/utils/agentMessageAdapter";
+import {
+  parseThinkingMarkers,
+  buildAgentMessage,
+  buildThinkingMeta,
+  displayToAgentMessage,
+  sanitizeAssistantDisplayText,
+} from "@/utils/agentMessageAdapter";
 import type { EngineStatus } from "@/types/agent";
 import type {
   ApprovalNeededPayload,
@@ -42,12 +48,12 @@ export function useAgentEvents() {
   useEffect(() => {
     const listeners: Promise<UnlistenFn>[] = [];
 
-    // ── agent:text_delta (buffered ~30fps) ─────────────────────────────
+    // ── agent:text_delta (buffered per paint frame) ────────────────────
     const deltaBuffers = new Map<string, string>();
-    let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let deltaFlushRaf: number | null = null;
 
     function flushDeltas() {
-      deltaFlushTimer = null;
+      deltaFlushRaf = null;
       const store = useAppStore.getState();
       for (const [sid, buffered] of deltaBuffers) {
         if (!store.activeSessionIds[sid]) continue;
@@ -60,7 +66,9 @@ export function useAgentEvents() {
       listen<TextDeltaPayload>("agent:text_delta", (event) => {
         const { thread_id, delta } = event.payload;
         deltaBuffers.set(thread_id, (deltaBuffers.get(thread_id) ?? "") + delta);
-        if (!deltaFlushTimer) deltaFlushTimer = setTimeout(flushDeltas, 32);
+        if (deltaFlushRaf == null) {
+          deltaFlushRaf = requestAnimationFrame(flushDeltas);
+        }
       }),
     );
 
@@ -124,7 +132,7 @@ export function useAgentEvents() {
         const store = useAppStore.getState();
 
         const { cleanText, thinkingSteps, durationSeconds } = parseThinkingMarkers(content);
-        const displayText = cleanText || content;
+        const displayText = sanitizeAssistantDisplayText(cleanText || content);
 
         // Internal markers handled by dedicated UI — don't render as a message.
         if (displayText.startsWith("Starting coding session:") || displayText.startsWith("Plan saved:")) {
@@ -366,9 +374,9 @@ export function useAgentEvents() {
     );
 
     return () => {
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-        deltaFlushTimer = null;
+      if (deltaFlushRaf != null) {
+        cancelAnimationFrame(deltaFlushRaf);
+        deltaFlushRaf = null;
         flushDeltas();
       }
       listeners.forEach((p) => p.then((fn) => fn()).catch(() => {}));

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import Markdown from "../../common/Markdown";
 import ImageLightbox from "./ImageLightbox";
 import AgentThinkingCollapsible from "../AgentThinkingCollapsible/AgentThinkingCollapsible";
@@ -11,7 +11,7 @@ interface Props {
   onRewindAgent?: RewindAgentProps;
 }
 
-export default function AgentMessageBubble({ message, onRewindAgent }: Props) {
+function AgentMessageBubble({ message, onRewindAgent }: Props) {
   const [hovered, setHovered] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const isUser = message.role === "user";
@@ -88,6 +88,8 @@ export default function AgentMessageBubble({ message, onRewindAgent }: Props) {
       {bodyText && (
         <Markdown
           className={`message-html text-sm leading-relaxed text-gray-800 dark:text-gray-200 overflow-x-auto${isStreaming ? " streaming-text" : ""}`}
+          enableMermaid={!isStreaming}
+          disableSyntaxHighlight={isStreaming}
         >
           {bodyText}
         </Markdown>
@@ -95,3 +97,47 @@ export default function AgentMessageBubble({ message, onRewindAgent }: Props) {
     </div>
   );
 }
+
+function areEqual(prev: Props, next: Props): boolean {
+  if (prev.onRewindAgent !== next.onRewindAgent) return false;
+
+  const a = prev.message;
+  const b = next.message;
+  if (
+    a.id !== b.id ||
+    a.role !== b.role ||
+    a.text !== b.text ||
+    a.created_at !== b.created_at
+  ) {
+    return false;
+  }
+
+  const aImages = a.images ?? [];
+  const bImages = b.images ?? [];
+  if (aImages.length !== bImages.length) return false;
+  for (let i = 0; i < aImages.length; i += 1) {
+    if (aImages[i] !== bImages[i]) return false;
+  }
+
+  const aTools = a.thinking?.toolCalls ?? [];
+  const bTools = b.thinking?.toolCalls ?? [];
+  if ((a.thinking?.durationSeconds ?? 0) !== (b.thinking?.durationSeconds ?? 0)) {
+    return false;
+  }
+  if (aTools.length !== bTools.length) return false;
+  for (let i = 0; i < aTools.length; i += 1) {
+    if (
+      aTools[i].toolCallId !== bTools[i].toolCallId ||
+      aTools[i].toolName !== bTools[i].toolName ||
+      aTools[i].argsSummary !== bTools[i].argsSummary ||
+      aTools[i].status !== bTools[i].status ||
+      aTools[i].summary !== bTools[i].summary
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export default memo(AgentMessageBubble, areEqual);

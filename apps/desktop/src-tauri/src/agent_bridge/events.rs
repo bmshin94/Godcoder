@@ -61,7 +61,8 @@ impl MessageAccumulator {
             }
             content.push_str("<!-- /thinking -->\n\n");
         }
-        content.push_str(&self.text_buffer);
+        let sanitized = sanitize_assistant_display_text(&self.text_buffer);
+        content.push_str(&sanitized);
         self.thinking_steps.clear();
         self.thinking_start = None;
         self.text_buffer.clear();
@@ -77,6 +78,95 @@ impl Default for MessageAccumulator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn parse_tool_payload_json(raw: &str) -> Option<Value> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        return Some(v);
+    }
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+    let mut lines = trimmed.lines();
+    let first = lines.next().unwrap_or_default().trim();
+    if !first.starts_with("```") {
+        return None;
+    }
+    let mut body = String::new();
+    for line in lines {
+        if line.trim().starts_with("```") {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(body).ok()
+}
+
+fn leaked_tool_name(v: &Value) -> Option<String> {
+    let obj = v.as_object()?;
+
+    if obj.contains_key("tool_calls") {
+        let calls = obj.get("tool_calls")?.as_array()?;
+        let first = calls.first()?;
+        if let Some(name) = first
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+        {
+            return Some(name.to_string());
+        }
+        return first.get("name").and_then(|n| n.as_str()).map(|n| n.to_string());
+    }
+
+    if obj.contains_key("function") {
+        if let Some(name) = obj
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+        {
+            return Some(name.to_string());
+        }
+    }
+
+    if obj.contains_key("arguments") {
+        if let Some(name) = obj.get("name").and_then(|n| n.as_str()) {
+            return Some(name.to_string());
+        }
+        if let Some(name) = obj.get("tool").and_then(|n| n.as_str()) {
+            return Some(name.to_string());
+        }
+    }
+
+    None
+}
+
+fn conversational_fallback_for_tool(tool_name: &str) -> String {
+    let normalized = tool_name.to_ascii_lowercase();
+    if normalized.contains("todo_write") || normalized.contains("todo") {
+        return "I updated the todo list and will continue with the next steps.".to_string();
+    }
+    format!(
+        "I used the {tool_name} tool and I will continue with the next step."
+    )
+}
+
+fn sanitize_assistant_display_text(raw: &str) -> String {
+    let Some(v) = parse_tool_payload_json(raw) else {
+        return raw.to_string();
+    };
+    let Some(tool_name) = leaked_tool_name(&v) else {
+        return raw.to_string();
+    };
+    conversational_fallback_for_tool(&tool_name)
 }
 
 // ── Relay ─────────────────────────────────────────────────────────────────────

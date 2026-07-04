@@ -202,6 +202,14 @@ npm run tauri:build
 ```
 
 > **Windows shortcut:** Double-click `launch-godcoder.bat` in the repo root — it sets up Cargo on PATH, refreshes stale Tauri build caches (important if the repo moved drives, e.g. `D:` -> `E:`), and starts the app automatically.
+>
+> **Rust preflight note (Windows):** The launcher now validates `rustc -vV` before starting Tauri. If Rust is in a broken state, it exits early with remediation steps instead of triggering a Tauri CLI panic. Use:
+>
+> ```powershell
+> rustup toolchain uninstall stable-x86_64-pc-windows-msvc
+> rustup toolchain install stable-x86_64-pc-windows-msvc --profile default
+> rustup default stable-x86_64-pc-windows-msvc
+> ```
 
 > **Windows brute-force integration path (optional):** Run `launch-godcoder-bruteforce.bat` to first force-install and validate `third_party/ResearchSwarm-master` and `third_party/loop-engineering-main`, then hand off to the normal launcher unchanged.
 >

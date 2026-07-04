@@ -45,12 +45,39 @@ REM ---------------------------------------------------------------------------
 REM Ensure Cargo (Rust) is on PATH even if it isn't configured globally.
 set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 set "REPO_ROOT=%~dp0"
+REM Guard against broken inherited OLLAMA_HOST values from user/system env.
+set "OLLAMA_HOST=http://127.0.0.1:11434"
 
 REM Verify cargo is available before doing anything else.
 where cargo >nul 2>nul
 if errorlevel 1 (
     echo [Godcoder] Could not find "cargo". Install Rust from https://rustup.rs
     echo            or make sure cargo.exe is in "%USERPROFILE%\.cargo\bin".
+    pause
+    exit /b 1
+)
+
+REM Verify rustc is usable before launching Tauri. If rustc is broken/missing,
+REM tauri-cli can panic with an internal Option::unwrap error.
+REM See README.md (Windows shortcut section) for rustc recovery commands.
+where rustc >nul 2>nul
+if errorlevel 1 (
+    echo [Godcoder] Could not find "rustc" on PATH.
+    echo            Run: rustup toolchain install stable-x86_64-pc-windows-msvc
+    echo                 rustup default stable-x86_64-pc-windows-msvc
+    pause
+    exit /b 1
+)
+
+set "RUSTC_HOST="
+for /f "tokens=1,* delims=:" %%A in ('rustc -vV 2^>nul ^| findstr /b /c:"host:"') do set "RUSTC_HOST=%%B"
+if not defined RUSTC_HOST (
+    echo [Godcoder] "rustc -vV" failed or returned unexpected output.
+    echo            This can cause tauri-cli to panic during startup.
+    echo            Remediation:
+    echo              1^) rustup toolchain uninstall stable-x86_64-pc-windows-msvc
+    echo              2^) rustup toolchain install stable-x86_64-pc-windows-msvc --profile default
+    echo              3^) rustup default stable-x86_64-pc-windows-msvc
     pause
     exit /b 1
 )

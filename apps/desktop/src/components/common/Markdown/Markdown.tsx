@@ -86,6 +86,7 @@ export interface MarkdownProps {
   children: string;
   className?: string;
   enableMermaid?: boolean;
+  disableSyntaxHighlight?: boolean;
 }
 
 /**
@@ -93,7 +94,12 @@ export interface MarkdownProps {
  * mermaid code blocks, and Tauri-shell links. Replaces the per-surface
  * ad-hoc ReactMarkdown usages.
  */
-export default function Markdown({ children, className = 'message-html', enableMermaid = true }: MarkdownProps) {
+export default function Markdown({
+  children,
+  className = 'message-html',
+  enableMermaid = true,
+  disableSyntaxHighlight = false,
+}: MarkdownProps) {
   const components: Components = {
     a: ({ href, children }) => (
       <a
@@ -118,6 +124,13 @@ export default function Markdown({ children, className = 'message-html', enableM
       const isBlock = !!lang || text.includes('\n');
       if (!isBlock) {
         return <code className={cls} {...props}>{codeChildren}</code>;
+      }
+      if (disableSyntaxHighlight) {
+        return (
+          <pre className="overflow-x-auto">
+            <code className={lang ? `language-${lang}` : undefined}>{text.replace(/\n$/, '')}</code>
+          </pre>
+        );
       }
       return <CodeBlock code={text.replace(/\n$/, '')} lang={lang} />;
     },

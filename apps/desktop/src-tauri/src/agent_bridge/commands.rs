@@ -940,6 +940,14 @@ fn build_agent_config(
         }
     }
 
+    // Keep end-user replies natural and hide internal tool protocol details.
+    if let Some(blocks) = config.system_prompt.as_mut() {
+        blocks.push(agent::agent::prompt::SystemBlock {
+            text: "# Conversation Style\nRespond as a conversational assistant. After using tools, provide a short, natural-language update. Never output raw tool-call JSON or internal protocol payloads (for example {\"name\": ..., \"arguments\": ...}) as your final reply.\n".to_string(),
+            cache_control: Some(agent::llm::types::CacheControl::ephemeral()),
+        });
+    }
+
     // Freestyle and Harness modes: full autonomy + a higher iteration cap. The
     // autonomy directive lives in the dedicated system prompt (selected by
     // `build_system_prompt`); tool auto-approval is enforced separately when
@@ -1232,6 +1240,95 @@ fn parse_tool_chips(llm_message: &str) -> Vec<ToolChip> {
             Some(ToolChip { name, summary })
         })
         .collect()
+}
+
+fn parse_tool_payload_json(raw: &str) -> Option<serde_json::Value> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(v);
+    }
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+    let mut lines = trimmed.lines();
+    let first = lines.next().unwrap_or_default().trim();
+    if !first.starts_with("```") {
+        return None;
+    }
+    let mut body = String::new();
+    for line in lines {
+        if line.trim().starts_with("```") {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(body).ok()
+}
+
+fn leaked_tool_name(v: &serde_json::Value) -> Option<String> {
+    let obj = v.as_object()?;
+
+    if obj.contains_key("tool_calls") {
+        let calls = obj.get("tool_calls")?.as_array()?;
+        let first = calls.first()?;
+        if let Some(name) = first
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+        {
+            return Some(name.to_string());
+        }
+        return first.get("name").and_then(|n| n.as_str()).map(|n| n.to_string());
+    }
+
+    if obj.contains_key("function") {
+        if let Some(name) = obj
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+        {
+            return Some(name.to_string());
+        }
+    }
+
+    if obj.contains_key("arguments") {
+        if let Some(name) = obj.get("name").and_then(|n| n.as_str()) {
+            return Some(name.to_string());
+        }
+        if let Some(name) = obj.get("tool").and_then(|n| n.as_str()) {
+            return Some(name.to_string());
+        }
+    }
+
+    None
+}
+
+fn conversational_fallback_for_tool(tool_name: &str) -> String {
+    let normalized = tool_name.to_ascii_lowercase();
+    if normalized.contains("todo_write") || normalized.contains("todo") {
+        return "I updated the todo list and will continue with the next steps.".to_string();
+    }
+    format!(
+        "I used the {tool_name} tool and I will continue with the next step."
+    )
+}
+
+fn sanitize_assistant_display_text(raw: &str) -> String {
+    let Some(v) = parse_tool_payload_json(raw) else {
+        return raw.to_string();
+    };
+    let Some(tool_name) = leaked_tool_name(&v) else {
+        return raw.to_string();
+    };
+    conversational_fallback_for_tool(&tool_name)
 }
 
 #[derive(Debug, Serialize)]
@@ -1986,6 +2083,11 @@ pub async fn agent_get_messages(
         // a bare `content.as_str()` would miss — silently dropping image messages).
         let (text, images) =
             crate::agent_bridge::db::extract_display_content(&msg.llm_message, &msg.session_id);
+        let text = if msg.role == "assistant" {
+            sanitize_assistant_display_text(&text)
+        } else {
+            text
+        };
         if text.is_empty() && images.is_empty() {
             if msg.role == "user" {
                 pending_tools.clear();

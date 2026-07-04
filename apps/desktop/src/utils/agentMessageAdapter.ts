@@ -1,5 +1,67 @@
 import type { AgentMessage, AgentMessageRole, Artifact, AgentToolCallState, AgentDisplayMessage } from '../types/agent';
 
+function parseToolPayloadJson(raw: string): unknown | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Continue: content may be wrapped in a fenced json block.
+  }
+  if (!trimmed.startsWith('```')) return null;
+  const lines = trimmed.split('\n');
+  if (!lines[0].trim().startsWith('```')) return null;
+  const body: string[] = [];
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i].trim().startsWith('```')) break;
+    body.push(lines[i]);
+  }
+  const candidate = body.join('\n').trim();
+  if (!candidate) return null;
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function leakedToolName(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const obj = payload as Record<string, unknown>;
+
+  if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
+    const first = obj.tool_calls[0] as Record<string, unknown>;
+    const fn = first?.function as Record<string, unknown> | undefined;
+    if (typeof fn?.name === 'string') return fn.name;
+    if (typeof first?.name === 'string') return first.name;
+  }
+
+  if (obj.function && typeof obj.function === 'object') {
+    const fn = obj.function as Record<string, unknown>;
+    if (typeof fn.name === 'string') return fn.name;
+  }
+
+  if ('arguments' in obj) {
+    if (typeof obj.name === 'string') return obj.name;
+    if (typeof obj.tool === 'string') return obj.tool;
+  }
+
+  return null;
+}
+
+export function sanitizeAssistantDisplayText(text: string): string {
+  const payload = parseToolPayloadJson(text);
+  if (!payload) return text;
+  const toolName = leakedToolName(payload);
+  if (!toolName) return text;
+
+  const normalized = toolName.toLowerCase();
+  if (normalized.includes('todo_write') || normalized.includes('todo')) {
+    return 'I updated the todo list and will continue with the next steps.';
+  }
+  return `I used the ${toolName} tool and I will continue with the next step.`;
+}
+
 /** Convert a persisted display message (with reconstructed tool chips) into the
  * frontend AgentMessage, attaching `thinking` from the tool calls. */
 export function displayToAgentMessage(m: AgentDisplayMessage): AgentMessage {
@@ -21,7 +83,7 @@ export function displayToAgentMessage(m: AgentDisplayMessage): AgentMessage {
     thread_id: m.session_id,
     agent_id: '',
     role,
-    text: m.text,
+    text: role === 'agent' ? sanitizeAssistantDisplayText(m.text) : m.text,
     images: m.images,
     artifacts: [],
     created_at: m.created_at,
