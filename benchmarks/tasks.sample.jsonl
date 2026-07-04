@@ -1,0 +1,2 @@
+{"instance_id":"sample-001","base_commit":"HEAD","problem_statement":"Fix the failing test in tests/example_test.py by updating src/example.py behavior.","max_iterations":30,"timeout_secs":900}
+{"instance_id":"sample-002","base_commit":"HEAD","problem_statement":"Refactor src/parser.py to avoid quadratic behavior in token scanning and keep tests passing.","max_iterations":40,"timeout_secs":1200}

@@ -9,10 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Planned
-- Prebuilt release binaries and OS installers (CI pipeline for macOS, Windows, Linux)
-- Headless benchmark harness for reproducible per-task evaluation across models
-- Broader LLM provider support
+### Added
+- Benchmark harness (`tools/benchmark_harness.py`) for headless, reproducible per-task evaluation across models using clean git-worktree sandboxes.
+- New manual GitHub Actions workflow (`.github/workflows/benchmark-harness.yml`) to execute benchmark runs and upload artifacts.
+
+### Changed
+- Release pipeline (`.github/workflows/release.yml`) now supports `v*` tag pushes by creating/reusing a release and uploading desktop artifacts plus static `bench-runner` binaries.
+- Broader provider model discovery support in desktop agent bridge, with compatibility for OpenAI/Anthropic and OpenAI-compatible/Ollama endpoint response shapes.
 
 ---
 

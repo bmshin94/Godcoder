@@ -2401,6 +2401,17 @@ struct ModelEntry {
     max_context_length: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct OllamaTagsResponse {
+    #[serde(default)]
+    models: Vec<OllamaModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct OllamaModelEntry {
+    name: String,
+}
+
 /// A model advertised by a provider's `/models`, with any discovered context length.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2409,13 +2420,100 @@ pub struct FetchedModel {
     pub context_length: Option<usize>,
 }
 
-/// Build the GET request to a provider's models endpoint (URL + auth headers).
-fn models_request(provider: &ProviderConfig) -> Result<reqwest::RequestBuilder, String> {
+fn parse_fetched_models(body: &str) -> Result<Vec<FetchedModel>, String> {
+    if let Ok(parsed) = serde_json::from_str::<ModelsListResponse>(body) {
+        if !parsed.data.is_empty() {
+            return Ok(parsed
+                .data
+                .into_iter()
+                .map(|m| FetchedModel {
+                    id: m.id,
+                    context_length: m.context_length.or(m.max_context_length),
+                })
+                .collect());
+        }
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<OllamaTagsResponse>(body) {
+        if !parsed.models.is_empty() {
+            return Ok(parsed
+                .models
+                .into_iter()
+                .map(|m| FetchedModel {
+                    id: m.name,
+                    context_length: None,
+                })
+                .collect());
+        }
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "Unexpected models response shape".to_string())?;
+    let arr = if let Some(a) = v.get("models").and_then(|m| m.as_array()) {
+        a.clone()
+    } else if let Some(a) = v.get("data").and_then(|m| m.as_array()) {
+        a.clone()
+    } else if let Some(a) = v.as_array() {
+        a.clone()
+    } else {
+        return Err("Unexpected models response shape".to_string());
+    };
+
+    let mut out = Vec::new();
+    for item in arr {
+        if let Some(s) = item.as_str() {
+            out.push(FetchedModel {
+                id: s.to_string(),
+                context_length: None,
+            });
+            continue;
+        }
+        let Some(obj) = item.as_object() else { continue };
+        let id = obj
+            .get("id")
+            .and_then(|x| x.as_str())
+            .or_else(|| obj.get("name").and_then(|x| x.as_str()))
+            .or_else(|| obj.get("model").and_then(|x| x.as_str()));
+        let Some(id) = id else { continue };
+        let context_length = obj
+            .get("context_length")
+            .and_then(|x| x.as_u64())
+            .map(|x| x as usize)
+            .or_else(|| obj.get("max_context_length").and_then(|x| x.as_u64()).map(|x| x as usize));
+        out.push(FetchedModel {
+            id: id.to_string(),
+            context_length,
+        });
+    }
+    if out.is_empty() {
+        Err("Unexpected models response shape".to_string())
+    } else {
+        Ok(out)
+    }
+}
+
+fn models_candidate_urls(provider: &ProviderConfig) -> Vec<String> {
+    let base = provider.base_url.trim_end_matches('/');
+    let mut urls = Vec::new();
+    match provider.provider() {
+        Provider::Anthropic => urls.push(format!("{base}/v1/models")),
+        Provider::OpenAI => {
+            urls.push(format!("{base}/models"));
+            if provider.kind == "ollama" {
+                let root = base.strip_suffix("/v1").unwrap_or(base);
+                urls.push(format!("{root}/api/tags"));
+            }
+        }
+    }
+    urls
+}
+
+/// Build a shared reqwest client + auth headers for the provider-model probes.
+fn models_probe_client(provider: &ProviderConfig) -> Result<(reqwest::Client, reqwest::header::HeaderMap), String> {
     use reqwest::header::{HeaderMap, AUTHORIZATION, HeaderValue};
 
-    let base = provider.base_url.trim_end_matches('/');
     let mut headers = HeaderMap::new();
-    let url = match provider.provider() {
+    match provider.provider() {
         Provider::Anthropic => {
             if !provider.api_key.is_empty() {
                 if let Ok(v) = HeaderValue::from_str(&provider.api_key) {
@@ -2426,7 +2524,6 @@ fn models_request(provider: &ProviderConfig) -> Result<reqwest::RequestBuilder, 
                 "anthropic-version",
                 HeaderValue::from_static(agent::llm::anthropic::ANTHROPIC_VERSION),
             );
-            format!("{base}/v1/models")
         }
         Provider::OpenAI => {
             if !provider.api_key.is_empty() {
@@ -2434,7 +2531,6 @@ fn models_request(provider: &ProviderConfig) -> Result<reqwest::RequestBuilder, 
                     headers.insert(AUTHORIZATION, v);
                 }
             }
-            format!("{base}/models")
         }
     };
 
@@ -2442,7 +2538,7 @@ fn models_request(provider: &ProviderConfig) -> Result<reqwest::RequestBuilder, 
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
-    Ok(client.get(&url).headers(headers))
+    Ok((client, headers))
 }
 
 /// Query the provider's models endpoint and return the advertised models plus
@@ -2450,21 +2546,43 @@ fn models_request(provider: &ProviderConfig) -> Result<reqwest::RequestBuilder, 
 /// (so it works before saving).
 #[tauri::command]
 pub async fn agent_fetch_provider_models(provider: ProviderConfig) -> Result<Vec<FetchedModel>, String> {
-    let resp = models_request(&provider)?
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("Models endpoint returned {}", resp.status()));
+    let (client, headers) = models_probe_client(&provider)?;
+    let mut last_status: Option<reqwest::StatusCode> = None;
+    let mut last_err: Option<String> = None;
+
+    for url in models_candidate_urls(&provider) {
+        let resp = client
+            .get(&url)
+            .headers(headers.clone())
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {e}"));
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            last_status = Some(resp.status());
+            continue;
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response: {e}"))?;
+        if let Ok(models) = parse_fetched_models(&body) {
+            if !models.is_empty() {
+                return Ok(models);
+            }
+        }
     }
-    let body = resp.text().await.map_err(|e| format!("Failed to read response: {e}"))?;
-    let parsed: ModelsListResponse =
-        serde_json::from_str(&body).map_err(|_| "Unexpected models response shape".to_string())?;
-    Ok(parsed
-        .data
-        .into_iter()
-        .map(|m| FetchedModel { id: m.id, context_length: m.context_length.or(m.max_context_length) })
-        .collect())
+
+    if let Some(status) = last_status {
+        return Err(format!("Models endpoint returned {status}"));
+    }
+    Err(last_err.unwrap_or_else(|| "Unexpected models response shape".to_string()))
 }
 
 /// Key check used before saving. Sends a minimal "hi" (max 16 tokens) through the
@@ -2480,14 +2598,20 @@ pub async fn agent_verify_provider(provider: ProviderConfig) -> Result<(), Strin
     // Probe the first configured model; if none picked yet, fall back to a
     // models-endpoint key check so we can still catch a bad key.
     let Some(probe_model) = provider.models.first().cloned() else {
-        return match models_request(&provider)?.send().await {
-            Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED
-                || resp.status() == reqwest::StatusCode::FORBIDDEN =>
-            {
-                Err(format!("API key rejected ({})", resp.status().as_u16()))
+        let (client, headers) = models_probe_client(&provider)?;
+        for url in models_candidate_urls(&provider) {
+            match client.get(&url).headers(headers.clone()).send().await {
+                Ok(resp)
+                    if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+                        || resp.status() == reqwest::StatusCode::FORBIDDEN =>
+                {
+                    return Err(format!("API key rejected ({})", resp.status().as_u16()));
+                }
+                Ok(_) => return Ok(()),
+                Err(_) => continue,
             }
-            _ => Ok(()),
-        };
+        }
+        return Ok(());
     };
 
     let mut cfg = provider_to_llm_config(&provider, &probe_model);

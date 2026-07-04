@@ -1,0 +1,77 @@
+name: Benchmark Harness
+
+# Headless, reproducible benchmark runs over the same Rust agent core used by
+# the desktop app. Creates clean per-task git-worktree sandboxes and can run
+# graph-localization validation (Context Engine OFF vs ON).
+on:
+  workflow_dispatch:
+    inputs:
+      tasks_file:
+        description: "Path to tasks file (.jsonl or JSON array)"
+        required: true
+        default: "benchmarks/tasks.sample.jsonl"
+      models:
+        description: "Comma-separated model ids"
+        required: true
+        default: "qwen2.5-coder:7b-instruct"
+      provider:
+        description: "Provider wire format"
+        required: true
+        default: "openai"
+      base_url:
+        description: "Optional model endpoint base URL (OpenAI-compatible or Anthropic)"
+        required: false
+      context_engine_url:
+        description: "Optional Context Engine URL to validate graph retrieval localization"
+        required: false
+      keep_sandboxes:
+        description: "Keep per-task sandboxes after run"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Build bench-runner
+        run: cargo build --release --locked -p bench-runner
+
+      - name: Run benchmark harness
+        env:
+          SUPERCODER_LLM_API_KEY: ${{ secrets.SUPERCODER_LLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          EXTRA_ARGS=()
+          if [ -n "${{ inputs.base_url }}" ]; then
+            EXTRA_ARGS+=(--base-url "${{ inputs.base_url }}")
+          fi
+          if [ -n "${{ inputs.context_engine_url }}" ]; then
+            EXTRA_ARGS+=(--context-engine-url "${{ inputs.context_engine_url }}" --validate-graph-localization)
+          fi
+          if [ "${{ inputs.keep_sandboxes }}" = "true" ]; then
+            EXTRA_ARGS+=(--keep-sandboxes)
+          fi
+          python3 tools/benchmark_harness.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --bench-runner target/release/bench-runner \
+            --tasks "${{ inputs.tasks_file }}" \
+            --models "${{ inputs.models }}" \
+            --provider "${{ inputs.provider }}" \
+            "${EXTRA_ARGS[@]}" \
+            --output-dir benchmark-results
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results

@@ -227,13 +227,55 @@ docker compose up -d --build
 
 Then enable **Settings → Context engine** in the app. Full instructions: [services/context-engine/README.md](services/context-engine/README.md).
 
+### Benchmark Harness (Headless, Reproducible)
+
+Run the same Rust agent core headlessly across tasks/models with reproducible
+per-task sandboxes:
+
+```bash
+# 1) Build bench-runner
+cargo build --release --locked -p bench-runner
+
+# 2) Export provider key
+export SUPERCODER_LLM_API_KEY="..."
+
+# 3) Run reproducible benchmark harness
+python3 tools/benchmark_harness.py \
+  --repo . \
+  --bench-runner target/release/bench-runner \
+  --tasks benchmarks/tasks.sample.jsonl \
+  --models "qwen2.5-coder:7b-instruct,gpt-4o-mini" \
+  --provider openai
+```
+
+To validate graph-retrieval localization (Context Engine OFF vs ON per task):
+
+```bash
+python3 tools/benchmark_harness.py \
+  --repo . \
+  --bench-runner target/release/bench-runner \
+  --tasks benchmarks/tasks.sample.jsonl \
+  --models "qwen2.5-coder:7b-instruct" \
+  --provider openai \
+  --context-engine-url http://localhost:8106 \
+  --validate-graph-localization
+```
+
+This emits `runs.jsonl`, `summary.json`, and `summary.md` under `benchmark-results/`.
+
+### Releases & Installers
+
+Desktop installers and prebuilt binaries are now produced by CI through
+`.github/workflows/release.yml` (release publish and `v*` tag push paths),
+including a static `bench-runner` release artifact.
+
 ---
 
 ## 🗺️ Roadmap
 
-- [ ] Prebuilt releases & installers — CI pipeline for binaries lands next
-- [ ] Benchmark harness — headless runner over the same agent core, with reproducible per-task sandboxes to measure the harness across models and validate graph-retrieval localization
-- [ ] Broader provider support — the provider abstraction is built to grow
+- [x] Prebuilt releases & installers — CI pipeline for binaries
+- [x] Benchmark harness — headless runner over the same agent core, with reproducible per-task sandboxes to measure the harness across models and validate graph-retrieval localization
+- [x] Broader provider support — model discovery now supports OpenAI/Anthropic plus OpenAI-compatible/Ollama endpoint shapes
 - [x] Ask / Plan / Coding modes
 - [x] **Self-optimizing Harness mode** — agent builds and improves its own harness in real time
 - [x] Checkpoint & rewind
