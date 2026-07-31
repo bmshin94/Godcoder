@@ -10,8 +10,12 @@ interface RewindEditorProps {
   text: string;
   /** Image data-URLs attached to the message being edited. */
   images?: string[];
+  /** Video data-URLs attached to the message being edited. */
+  videos?: string[];
   /** Remove the image at the given index from the resend. */
   onRemoveImage?: (idx: number) => void;
+  /** Remove the video at the given index from the resend. */
+  onRemoveVideo?: (idx: number) => void;
   onChange: (text: string) => void;
   onCancel: () => void;
   onRewind: (restoreCode: boolean) => void;
@@ -22,7 +26,9 @@ interface RewindEditorProps {
 export default function RewindEditor({
   text,
   images = [],
+  videos = [],
   onRemoveImage,
+  onRemoveVideo,
   onChange,
   onCancel,
   onRewind,
@@ -43,8 +49,8 @@ export default function RewindEditor({
     }
   };
 
-  // Resend is allowed with text OR at least one kept image.
-  const canResend = !!text.trim() || images.length > 0;
+  // Resend is allowed with text or at least one kept attachment.
+  const canResend = !!text.trim() || images.length > 0 || videos.length > 0;
 
   return (
     <div className="flex flex-col gap-2 p-3 rounded-lg" style={{ background: 'var(--white-opacity-4)' }}>
@@ -62,6 +68,30 @@ export default function RewindEditor({
                   type="button"
                   aria-label="Remove image"
                   onClick={() => onRemoveImage(i)}
+                  className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-white shadow hover:bg-black"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {videos.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {videos.map((src, i) => (
+            <div key={i} className="relative group">
+              <video
+                src={src}
+                className="h-24 max-w-40 rounded-lg border border-gray-200 dark:border-dark-border object-cover"
+                controls
+                preload="metadata"
+              />
+              {onRemoveVideo && !isRewinding && (
+                <button
+                  type="button"
+                  aria-label="Remove video"
+                  onClick={() => onRemoveVideo(i)}
                   className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-gray-800 text-white shadow hover:bg-black"
                 >
                   <X size={12} />

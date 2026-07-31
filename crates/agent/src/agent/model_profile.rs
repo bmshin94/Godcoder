@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Minimal model metadata — only what the agent crate needs for correct behavior.
 /// Display info (display_name, provider) is for the frontend model picker.
-/// The only field that affects agent logic is `context_window` (drives compaction).
+/// Context size drives compaction, while input capabilities gate attachments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfile {
     pub id: String,
@@ -14,6 +14,12 @@ pub struct ModelProfile {
     /// `merge()` / `ModelsResponse` JSON without the field still deserializes.
     #[serde(default)]
     pub supports_images: bool,
+    /// Whether the model accepts video inputs.
+    #[serde(default)]
+    pub supports_videos: bool,
+    /// Supported thinking modes exposed by the provider.
+    #[serde(default)]
+    pub thinking: Vec<String>,
 }
 
 /// Registry of known model profiles.
@@ -78,19 +84,32 @@ pub struct ModelsResponse {
 
 /// Helper to keep the (long) default list terse and readable.
 fn profile(id: &str, name: &str, provider: &str, ctx: usize, vision: bool) -> ModelProfile {
+    profile_with_capabilities(id, name, provider, ctx, vision, false, &[])
+}
+
+fn profile_with_capabilities(
+    id: &str,
+    name: &str,
+    provider: &str,
+    ctx: usize,
+    images: bool,
+    videos: bool,
+    thinking: &[&str],
+) -> ModelProfile {
     ModelProfile {
         id: id.into(),
         display_name: name.into(),
         provider: provider.into(),
         context_window: ctx,
-        supports_images: vision,
+        supports_images: images,
+        supports_videos: videos,
+        thinking: thinking.iter().map(|mode| (*mode).to_string()).collect(),
     }
 }
 
 /// The single authoritative list of built-in models. Drives both the
 /// context-window sizing (compaction / context bar) AND the Settings model
-/// picker (exposed to the frontend via `agent_list_models`). All entries are
-/// vision-capable. Context windows verified against provider docs (June 2026).
+/// picker (exposed to the frontend via `agent_list_models`).
 fn default_profiles() -> Vec<ModelProfile> {
     vec![
         // ── Anthropic ──────────────────────────────────────────────────────
@@ -100,6 +119,25 @@ fn default_profiles() -> Vec<ModelProfile> {
         profile("claude-opus-4-6", "Claude Opus 4.6", "anthropic", 1_000_000, true),
         profile("claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic", 1_000_000, true),
         profile("claude-haiku-4-5", "Claude Haiku 4.5", "anthropic", 200_000, true),
+        // ── MiniMax ────────────────────────────────────────────────────────
+        profile_with_capabilities(
+            "MiniMax-M3",
+            "MiniMax-M3",
+            "minimax",
+            1_000_000,
+            true,
+            true,
+            &["adaptive", "disabled"],
+        ),
+        profile_with_capabilities(
+            "MiniMax-M2.7",
+            "MiniMax-M2.7",
+            "minimax",
+            204_800,
+            false,
+            false,
+            &["always_on"],
+        ),
         // ── OpenAI ─────────────────────────────────────────────────────────
         // GPT-5.5 + GPT-5.4 (standard) and GPT-4.1 are 1M. The GPT-5.4 mini/nano
         // variants and all of GPT-5.0–5.2 are 400k. GPT-4o is 128k.
@@ -177,6 +215,8 @@ mod tests {
             provider: "openai".into(),
             context_window: 256_000, // gateway says it grew
             supports_images: true,
+            supports_videos: false,
+            thinking: Vec::new(),
         }]);
 
         assert_eq!(reg.context_window_for("gpt-4o-mini"), 256_000);
@@ -194,6 +234,8 @@ mod tests {
             provider: "openai".into(),
             context_window: 2_000_000,
             supports_images: false,
+            supports_videos: false,
+            thinking: Vec::new(),
         }]);
 
         assert_eq!(reg.context_window_for("future-model-x"), 2_000_000);
@@ -252,5 +294,23 @@ mod tests {
         assert_eq!(resp.models.len(), 1);
         assert_eq!(resp.models[0].id, "test-model");
         assert_eq!(resp.models[0].context_window, 32000);
+        assert!(!resp.models[0].supports_videos);
+        assert!(resp.models[0].thinking.is_empty());
+    }
+
+    #[test]
+    fn test_minimax_profiles_include_input_and_thinking_capabilities() {
+        let reg = ModelRegistry::with_defaults();
+        let m3 = reg.get("MiniMax-M3").unwrap();
+        assert_eq!(m3.context_window, 1_000_000);
+        assert!(m3.supports_images);
+        assert!(m3.supports_videos);
+        assert_eq!(m3.thinking, vec!["adaptive", "disabled"]);
+
+        let m27 = reg.get("MiniMax-M2.7").unwrap();
+        assert_eq!(m27.context_window, 204_800);
+        assert!(!m27.supports_images);
+        assert!(!m27.supports_videos);
+        assert_eq!(m27.thinking, vec!["always_on"]);
     }
 }

@@ -85,6 +85,7 @@ export function displayToAgentMessage(m: AgentDisplayMessage): AgentMessage {
     role,
     text: role === 'agent' ? sanitizeAssistantDisplayText(m.text) : m.text,
     images: m.images,
+    videos: m.videos,
     artifacts: [],
     created_at: m.created_at,
     thinking,
@@ -103,6 +104,7 @@ export function buildAgentMessage(
   artifacts?: Artifact[],
   thinking?: AgentMessage['thinking'],
   images?: string[],
+  videos?: string[],
 ): AgentMessage {
   return {
     id,
@@ -111,6 +113,7 @@ export function buildAgentMessage(
     role,
     text,
     images,
+    videos,
     artifacts: artifacts ?? [],
     created_at: new Date().toISOString(),
     thinking,

@@ -88,10 +88,20 @@ pub enum ContentBlock {
 
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrlContent },
+
+    #[serde(rename = "video_url")]
+    VideoUrl { video_url: VideoUrlContent },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageUrlContent {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoUrlContent {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -124,6 +134,13 @@ impl MessageContent {
         match self {
             MessageContent::Text(_) => false,
             MessageContent::Blocks(blocks) => blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. })),
+        }
+    }
+
+    pub fn has_videos(&self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Blocks(blocks) => blocks.iter().any(|b| matches!(b, ContentBlock::VideoUrl { .. })),
         }
     }
 }
@@ -178,6 +195,10 @@ impl ChatMessage {
     }
 
     pub fn user_with_images(blocks: Vec<ContentBlock>) -> Self {
+        Self::user_with_media(blocks)
+    }
+
+    pub fn user_with_media(blocks: Vec<ContentBlock>) -> Self {
         Self {
             role: "user".into(),
             content: Some(MessageContent::Blocks(blocks)),
@@ -408,4 +429,3 @@ mod cache_control_tests {
         assert!(cc_idx > function_idx, "cache_control should appear after function in wire order");
     }
 }
-

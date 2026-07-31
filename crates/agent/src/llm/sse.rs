@@ -681,7 +681,7 @@ data: [DONE]\n\n";
     }
 
     // ════════════════════════════════════════════
-    // §4: Image / MessageContent Tests
+    // §4: Media / MessageContent Tests
     // ════════════════════════════════════════════
 
     #[test]
@@ -701,11 +701,18 @@ data: [DONE]\n\n";
                     detail: Some("auto".to_string()),
                 },
             },
+            ContentBlock::VideoUrl {
+                video_url: VideoUrlContent {
+                    url: "data:video/mp4;base64,abc123".to_string(),
+                    detail: None,
+                },
+            },
         ]);
         let json = serde_json::to_string(&content).unwrap();
         assert!(json.starts_with('['));
         assert!(json.contains("\"type\":\"text\""));
         assert!(json.contains("\"type\":\"image_url\""));
+        assert!(json.contains("\"type\":\"video_url\""));
     }
 
     #[test]
@@ -756,6 +763,32 @@ data: [DONE]\n\n";
         assert!(!MessageContent::Blocks(vec![
             ContentBlock::Text { text: "no images".into(), cache_control: None },
         ]).has_images());
+    }
+
+    #[test]
+    fn test_message_content_has_videos() {
+        assert!(!MessageContent::Text("hello".into()).has_videos());
+        assert!(MessageContent::Blocks(vec![ContentBlock::VideoUrl {
+            video_url: VideoUrlContent { url: "x".into(), detail: None },
+        }])
+        .has_videos());
+        assert!(!MessageContent::Blocks(vec![ContentBlock::Text {
+            text: "no videos".into(),
+            cache_control: None,
+        }])
+        .has_videos());
+    }
+
+    #[test]
+    fn test_user_with_media_constructor() {
+        let msg = ChatMessage::user_with_media(vec![
+            ContentBlock::Text { text: "Watch:".into(), cache_control: None },
+            ContentBlock::VideoUrl {
+                video_url: VideoUrlContent { url: "data:video/mp4;base64,abc".into(), detail: None },
+            },
+        ]);
+        assert_eq!(msg.role, "user");
+        assert!(msg.content.as_ref().unwrap().has_videos());
     }
 
     #[test]

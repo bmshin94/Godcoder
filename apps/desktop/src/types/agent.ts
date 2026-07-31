@@ -105,6 +105,8 @@ export interface AgentMessage {
   text: string;
   /** Image data-URLs attached to this message (shown in the bubble). */
   images?: string[];
+  /** Video data-URLs attached to this message (shown in the bubble). */
+  videos?: string[];
   artifacts: Artifact[];
   created_at: string;
   thinking?: {
@@ -176,6 +178,8 @@ export interface AgentDisplayMessage {
   duration_seconds: number;
   /** Image data-URLs attached to this message (rebuilt from on-disk refs). */
   images: string[];
+  /** Video data-URLs attached to this message (rebuilt from on-disk refs). */
+  videos: string[];
 }
 
 // --- Session (from the `sessions` table via Tauri) ---
@@ -229,22 +233,31 @@ export interface ModelProfile {
   display_name: string;
   provider: string;
   context_window: number;
+  supports_images?: boolean;
+  supports_videos?: boolean;
+  thinking?: string[];
 }
 
 /** UI provider kind → backend wire format. "openai_compatible" takes a custom base_url. */
-export type ProviderKind = 'openai' | 'openai_compatible' | 'anthropic' | 'ollama';
+export type ProviderKind = 'openai' | 'openai_compatible' | 'anthropic' | 'ollama' | 'minimax';
 
 /** Per-model discovered/edited metadata. Mirrors Rust `ModelMeta`. */
 export interface ModelMeta {
   /** Discovered context length; absent/null = unknown. */
   contextLength?: number | null;
   supportsImages?: boolean;
+  supportsVideos?: boolean;
+  thinking?: string[];
 }
 
 /** A saved LLM provider = an endpoint (no model bundled). Mirrors Rust `ProviderConfig`. */
 export interface ProviderConfig {
   id: string;
   kind: ProviderKind;
+  /** Optional backend wire-format override for curated presets. */
+  wireFormat?: string;
+  /** Built-in presets are editable but cannot be removed. */
+  builtin?: boolean;
   /** Display name — shown for openai_compatible providers; built-ins use their kind name. */
   label: string;
   baseUrl: string;
@@ -255,6 +268,8 @@ export interface ProviderConfig {
   modelMeta?: Record<string, ModelMeta>;
   /** Provider-level vision fallback for custom providers. */
   supportsImages?: boolean;
+  /** Provider-level video fallback for custom providers. */
+  supportsVideos?: boolean;
 }
 
 /** A model advertised by a provider's /models, with discovered context length. */
@@ -271,6 +286,8 @@ export interface CuratedModel {
   provider: string;
   contextWindow: number;
   supportsImages: boolean;
+  supportsVideos: boolean;
+  thinking: string[];
 }
 
 /** Resolved capability for the active (provider, model). Mirrors Rust `ModelCapability`. */
@@ -278,6 +295,8 @@ export interface ModelCapability {
   /** `null` = unknown → context bar shows raw count, auto-compaction off. */
   contextLimit: number | null;
   supportsImages: boolean;
+  supportsVideos: boolean;
+  thinking: string[];
   /** "known" | "discovered" | "unknown". */
   source: string;
 }

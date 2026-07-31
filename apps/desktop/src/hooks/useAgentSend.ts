@@ -28,6 +28,7 @@ export async function dispatchUserMessage(
 ): Promise<void> {
   const store = useAppStore.getState();
   const imageUrls = attachments?.filter((a) => a.media_type?.startsWith("image/")).map((a) => a.url);
+  const videoUrls = attachments?.filter((a) => a.media_type?.startsWith("video/")).map((a) => a.url);
   store.addMessageToThread(
     sessionId,
     buildAgentMessage(
@@ -39,6 +40,7 @@ export async function dispatchUserMessage(
       undefined,
       undefined,
       imageUrls && imageUrls.length > 0 ? imageUrls : undefined,
+      videoUrls && videoUrls.length > 0 ? videoUrls : undefined,
     ),
   );
   store.setActiveSession(sessionId, sessionId);
@@ -55,7 +57,7 @@ export function useAgentSend({ sessionId }: UseAgentSendOpts): UseAgentSendRetur
 
   const send = useCallback(
     async (text: string, mode?: string, attachments?: Attachment[]) => {
-      if (!text || !sessionId || isSending || isBusy) return;
+      if ((!text && (!attachments || attachments.length === 0)) || !sessionId || isSending || isBusy) return;
       setSending(true);
       try {
         await dispatchUserMessage(sessionId, text, mode, attachments);

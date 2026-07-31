@@ -36,6 +36,7 @@ function formatContext(tokens: number): string {
 }
 
 function providerName(p: ProviderConfig): string {
+  if (p.kind === "minimax") return p.label?.trim() || "MiniMax";
   if (p.kind === "openai") return "OpenAI";
   if (p.kind === "anthropic") return "Anthropic";
   if (p.kind === "ollama") return p.label?.trim() || "Ollama (local)";
@@ -47,7 +48,7 @@ function providerName(p: ProviderConfig): string {
   }
 }
 
-const isBuiltin = (p: ProviderConfig) => p.kind === "openai" || p.kind === "anthropic";
+const isBuiltin = (p: ProviderConfig) => p.builtin ?? (p.kind === "openai" || p.kind === "anthropic");
 
 const refToValue = (r: ModelRef | null) => (r ? `${r.providerId}::${r.model}` : undefined);
 const parseValue = (v: string): ModelRef => {
@@ -429,6 +430,8 @@ export default function Settings() {
           modelMeta[m.id] = {
             contextLength: m.contextLength,
             supportsImages: draft.modelMeta?.[m.id]?.supportsImages ?? draft.supportsImages ?? false,
+            supportsVideos: draft.modelMeta?.[m.id]?.supportsVideos ?? draft.supportsVideos ?? false,
+            thinking: draft.modelMeta?.[m.id]?.thinking ?? [],
           };
         }
         setDraft({ ...draft, models: merged, modelMeta });
