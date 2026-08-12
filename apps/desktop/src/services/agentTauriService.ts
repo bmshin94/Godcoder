@@ -20,6 +20,8 @@ import type {
   ProvidersResponse,
   SelectionRole,
   SessionRow,
+  TtsAudio,
+  TtsOptions,
   VoiceSettings,
 } from '../types/agent';
 import type { Attachment } from '../types/chat';
@@ -277,6 +279,14 @@ export const agentTauriService = {
 
   async setVoiceSettings(settings: VoiceSettings): Promise<void> {
     return invoke<void>('agent_set_voice_settings', { settings });
+  },
+
+  async getTtsOptions(): Promise<TtsOptions> {
+    return invoke<TtsOptions>('agent_get_tts_options');
+  },
+
+  async synthesizeSpeech(text: string): Promise<TtsAudio> {
+    return invoke<TtsAudio>('agent_synthesize_speech', { text });
   },
 
   // ── MCP servers (Model Context Protocol tool providers) ──────────────

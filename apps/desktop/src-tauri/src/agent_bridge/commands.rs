@@ -346,11 +346,19 @@ pub async fn agent_set_system_instructions(
 
 const VOICE_SETTINGS_KEY: &str = "voice_settings";
 
-/// API keys for the optional voice features. Empty strings mean "not configured".
+/// Local settings for optional voice features. Empty keys mean "not configured".
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct VoiceSettings {
     #[serde(default)]
     pub tts_api_key: String,
+    #[serde(default)]
+    pub tts_region: String,
+    #[serde(default)]
+    pub tts_model: String,
+    #[serde(default)]
+    pub tts_voice_id: String,
+    #[serde(default)]
+    pub tts_audio_format: String,
     #[serde(default)]
     pub stt_api_key: String,
     #[serde(default)]
@@ -358,7 +366,7 @@ pub struct VoiceSettings {
 }
 
 /// Read the saved voice settings (all-empty default when unset/corrupt).
-fn read_voice_settings(app_state: &AppState) -> VoiceSettings {
+pub(crate) fn read_voice_settings(app_state: &AppState) -> VoiceSettings {
     app_state
         .db
         .get_setting(VOICE_SETTINGS_KEY)
