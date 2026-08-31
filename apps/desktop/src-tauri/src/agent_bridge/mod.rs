@@ -6,3 +6,4 @@ pub mod permissions;
 pub mod skills;
 pub mod subagents;
 pub mod traits;
+pub mod tts;

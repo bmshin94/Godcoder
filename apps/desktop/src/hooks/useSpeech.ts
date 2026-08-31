@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { agentTauriService } from "@/services/agentTauriService";
 
 /** Minimal typings for the Web Speech API (not in the DOM lib by default). */
 interface SpeechRecognitionLike extends EventTarget {
@@ -21,6 +22,7 @@ function getRecognitionCtor(): RecognitionCtor | null {
 }
 
 const synthSupported = typeof window !== "undefined" && "speechSynthesis" in window;
+const remoteTtsSupported = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const recognitionSupported = typeof window !== "undefined" && !!getRecognitionCtor();
 
 /**
@@ -33,6 +35,8 @@ export function useSpeech() {
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const speechRequestRef = useRef(0);
   // Latest callback for final transcripts, kept in a ref so handlers stay stable.
   const onFinalRef = useRef<(text: string) => void>(() => {});
 
@@ -86,20 +90,49 @@ export function useSpeech() {
   );
 
   const cancelSpeak = useCallback(() => {
+    speechRequestRef.current += 1;
+    audioRef.current?.pause();
+    audioRef.current = null;
     if (synthSupported) window.speechSynthesis.cancel();
     setSpeaking(false);
   }, []);
 
   /** Speak `text` aloud, cancelling anything already in progress. */
   const speak = useCallback(
-    (text: string) => {
-      if (!synthSupported || !text.trim()) return;
-      window.speechSynthesis.cancel();
-      const utter = new SpeechSynthesisUtterance(text);
+    async (text: string) => {
+      const input = text.trim();
+      if ((!remoteTtsSupported && !synthSupported) || !input) return;
+      const requestId = ++speechRequestRef.current;
+      audioRef.current?.pause();
+      audioRef.current = null;
+      if (synthSupported) window.speechSynthesis.cancel();
+      setSpeaking(true);
+      if (remoteTtsSupported) {
+        try {
+          const result = await agentTauriService.synthesizeSpeech(input);
+          if (speechRequestRef.current !== requestId) return;
+          const audio = new Audio(result.data_url);
+          audioRef.current = audio;
+          audio.onended = () => {
+            if (speechRequestRef.current === requestId) setSpeaking(false);
+          };
+          audio.onerror = () => {
+            if (speechRequestRef.current === requestId) setSpeaking(false);
+          };
+          await audio.play();
+          return;
+        } catch {
+          // Fall through to local synthesis when no remote key is configured.
+        }
+      }
+      if (speechRequestRef.current !== requestId || !synthSupported) {
+        setSpeaking(false);
+        return;
+      }
+      const utter = new SpeechSynthesisUtterance(input);
       utter.lang = navigator.language || "en-US";
       utter.onend = () => setSpeaking(false);
       utter.onerror = () => setSpeaking(false);
-      setSpeaking(true);
       window.speechSynthesis.speak(utter);
     },
     [],
@@ -109,13 +142,15 @@ export function useSpeech() {
   useEffect(() => {
     return () => {
       recognitionRef.current?.abort();
+      speechRequestRef.current += 1;
+      audioRef.current?.pause();
       if (synthSupported) window.speechSynthesis.cancel();
     };
   }, []);
 
   return {
     sttSupported: recognitionSupported,
-    ttsSupported: synthSupported,
+    ttsSupported: remoteTtsSupported || synthSupported,
     listening,
     speaking,
     startListening,

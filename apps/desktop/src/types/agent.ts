@@ -352,16 +352,36 @@ export interface ContextEngineSettings {
   base_url: string;
 }
 
-/** API keys for the optional voice features: text-to-speech, speech-to-text
- *  and live voice-to-voice. Each key is stored locally and used only for its
- *  respective service. Empty string means "not configured". */
+/** Local settings for optional text-to-speech, speech-to-text, and live
+ * voice-to-voice features. Empty keys mean "not configured". */
 export interface VoiceSettings {
   /** Text-to-Speech (TTS) provider API key. */
   tts_api_key: string;
+  /** Regional text-to-speech API endpoint. */
+  tts_region: 'global_en' | 'cn_zh';
+  /** Text-to-speech model identifier. */
+  tts_model: string;
+  /** Optional voice identifier sent with synthesis requests. */
+  tts_voice_id: string;
+  /** Synthesized audio container or raw format. */
+  tts_audio_format: 'mp3' | 'wav' | 'flac' | 'pcm';
   /** Speech-to-Text (STT) provider API key. */
   stt_api_key: string;
   /** Voice-to-Voice (real-time speech) provider API key. */
   voice_to_voice_api_key: string;
+}
+
+export interface TtsOptions {
+  regions: Array<'global_en' | 'cn_zh'>;
+  models: string[];
+  audio_formats: Array<'mp3' | 'wav' | 'flac' | 'pcm'>;
+  default_model: string;
+}
+
+export interface TtsAudio {
+  data_url: string;
+  format: string;
+  status: number;
 }
 
 /** Live connection probe result for the Settings panel. */

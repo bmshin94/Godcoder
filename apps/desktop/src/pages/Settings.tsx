@@ -19,6 +19,7 @@ import type {
   ModelSelection,
   ProviderConfig,
   SelectionRole,
+  TtsOptions,
   VoiceSettings,
 } from "@/types/agent";
 const DEFAULT_BASE_URL: Record<string, string> = {
@@ -91,11 +92,21 @@ export default function Settings() {
   // User-defined system instructions (custom system prompt).
   const [systemInstructions, setSystemInstructions] = useState("");
   const [savingInstructions, setSavingInstructions] = useState(false);
-  // Voice feature API keys (TTS / STT / Voice-to-Voice).
+  // Voice feature settings (TTS / STT / Voice-to-Voice).
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>({
     tts_api_key: "",
+    tts_region: "global_en",
+    tts_model: "speech-2.8-hd",
+    tts_voice_id: "",
+    tts_audio_format: "mp3",
     stt_api_key: "",
     voice_to_voice_api_key: "",
+  });
+  const [ttsOptions, setTtsOptions] = useState<TtsOptions>({
+    regions: ["global_en", "cn_zh"],
+    models: [],
+    audio_formats: ["mp3", "wav", "flac", "pcm"],
+    default_model: "speech-2.8-hd",
   });
   const [savingVoice, setSavingVoice] = useState(false);
   const refresh = async () => {
@@ -113,7 +124,14 @@ export default function Settings() {
         setContextEngine(ce);
         setCuratedModels(await agentTauriService.listModels());
         setSystemInstructions(await agentTauriService.getSystemInstructions());
-        setVoiceSettings(await agentTauriService.getVoiceSettings());
+        const savedVoiceSettings = await agentTauriService.getVoiceSettings();
+        setVoiceSettings({
+          ...savedVoiceSettings,
+          tts_region: savedVoiceSettings.tts_region || "global_en",
+          tts_model: savedVoiceSettings.tts_model || "speech-2.8-hd",
+          tts_audio_format: savedVoiceSettings.tts_audio_format || "mp3",
+        });
+        setTtsOptions(await agentTauriService.getTtsOptions());
         const mode = await agentTauriService.engineMode();
         setEngineMode(mode);
         if (mode === "app") {
@@ -508,12 +526,16 @@ export default function Settings() {
     try {
       await agentTauriService.setVoiceSettings({
         tts_api_key: voiceSettings.tts_api_key.trim(),
+        tts_region: voiceSettings.tts_region,
+        tts_model: voiceSettings.tts_model,
+        tts_voice_id: voiceSettings.tts_voice_id.trim(),
+        tts_audio_format: voiceSettings.tts_audio_format,
         stt_api_key: voiceSettings.stt_api_key.trim(),
         voice_to_voice_api_key: voiceSettings.voice_to_voice_api_key.trim(),
       });
-      themedMessage.success("Voice API keys saved");
+      themedMessage.success("Voice settings saved");
     } catch {
-      themedMessage.error("Failed to save voice API keys");
+      themedMessage.error("Failed to save voice settings");
     } finally {
       setSavingVoice(false);
     }
@@ -778,8 +800,8 @@ export default function Settings() {
               Save instructions
             </Button>
 
-            {/* Voice API keys (TTS / STT / Voice-to-Voice) */}
-            <h2 className="text-base font-semibold text-[var(--text-primary)] mb-1">Voice API keys</h2>
+            {/* Voice settings (TTS / STT / Voice-to-Voice) */}
+            <h2 className="text-base font-semibold text-[var(--text-primary)] mb-1">Voice settings</h2>
             <p className="text-sm text-[var(--text-secondary)] mb-4">
               Keys for the optional voice features. Each is stored locally and used only for its service.
             </p>
@@ -797,6 +819,50 @@ export default function Settings() {
                 />
                 <div className="mt-1.5 text-[11px] text-[var(--text-secondary)]">
                   Used to synthesize spoken audio from the agent's responses.
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                  <div>
+                    <label className="block text-xs text-[var(--text-secondary)] mb-1">Region</label>
+                    <Select
+                      className="w-full"
+                      value={voiceSettings.tts_region}
+                      options={ttsOptions.regions.map((region) => ({
+                        value: region,
+                        label: region === "global_en" ? "Global" : "China",
+                      }))}
+                      onChange={(tts_region) => setVoiceSettings({ ...voiceSettings, tts_region })}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[var(--text-secondary)] mb-1">Model</label>
+                    <Select
+                      className="w-full"
+                      value={voiceSettings.tts_model}
+                      options={ttsOptions.models.map((model) => ({ value: model, label: model }))}
+                      onChange={(tts_model) => setVoiceSettings({ ...voiceSettings, tts_model })}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[var(--text-secondary)] mb-1">Voice ID (optional)</label>
+                    <Input
+                      value={voiceSettings.tts_voice_id}
+                      onChange={(event) =>
+                        setVoiceSettings({ ...voiceSettings, tts_voice_id: event.target.value })
+                      }
+                      placeholder="Voice identifier"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[var(--text-secondary)] mb-1">Audio format</label>
+                    <Select
+                      className="w-full"
+                      value={voiceSettings.tts_audio_format}
+                      options={ttsOptions.audio_formats.map((format) => ({ value: format, label: format }))}
+                      onChange={(tts_audio_format) =>
+                        setVoiceSettings({ ...voiceSettings, tts_audio_format })
+                      }
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -838,7 +904,7 @@ export default function Settings() {
 
               <div>
                 <Button type="primary" onClick={saveVoiceSettings} loading={savingVoice}>
-                  Save voice keys
+                  Save voice settings
                 </Button>
               </div>
             </div>
