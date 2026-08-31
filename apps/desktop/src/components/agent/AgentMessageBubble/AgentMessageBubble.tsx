@@ -37,6 +37,7 @@ function AgentMessageBubble({ message, onRewindAgent }: Props) {
   // ── User → right-aligned bubble (iMessage style) ───────────────────────
   if (isUser) {
     const images = message.images ?? [];
+    const videos = message.videos ?? [];
     return (
       <div
         className="group flex justify-end items-start gap-2 py-1"
@@ -58,6 +59,19 @@ function AgentMessageBubble({ message, onRewindAgent }: Props) {
                   alt={`attachment ${i + 1}`}
                   onClick={() => setPreview(src)}
                   className="max-h-48 max-w-full rounded-xl border border-gray-200 dark:border-dark-border cursor-zoom-in"
+                />
+              ))}
+            </div>
+          )}
+          {videos.length > 0 && (
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {videos.map((src, i) => (
+                <video
+                  key={i}
+                  src={src}
+                  controls
+                  preload="metadata"
+                  className="max-h-64 max-w-full rounded-xl border border-gray-200 dark:border-dark-border"
                 />
               ))}
             </div>
@@ -117,6 +131,13 @@ function areEqual(prev: Props, next: Props): boolean {
   if (aImages.length !== bImages.length) return false;
   for (let i = 0; i < aImages.length; i += 1) {
     if (aImages[i] !== bImages[i]) return false;
+  }
+
+  const aVideos = a.videos ?? [];
+  const bVideos = b.videos ?? [];
+  if (aVideos.length !== bVideos.length) return false;
+  for (let i = 0; i < aVideos.length; i += 1) {
+    if (aVideos[i] !== bVideos[i]) return false;
   }
 
   const aTools = a.thinking?.toolCalls ?? [];

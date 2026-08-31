@@ -81,7 +81,10 @@ pub enum AnthropicContentBlock {
         cache_control: Option<CacheControl>,
     },
     Image {
-        source: AnthropicImageSource,
+        source: AnthropicMediaSource,
+    },
+    Video {
+        source: AnthropicMediaSource,
     },
     ToolUse {
         id: String,
@@ -102,7 +105,7 @@ pub enum AnthropicContentBlock {
 }
 
 #[derive(Debug, Serialize)]
-pub struct AnthropicImageSource {
+pub struct AnthropicMediaSource {
     #[serde(rename = "type")]
     pub type_: &'static str, // "base64"
     pub media_type: String,
@@ -186,11 +189,17 @@ pub fn build_anthropic_request(
         }
     }
 
-    // 5. Extended thinking forces temperature=1.0 (Anthropic requirement).
-    let (thinking, temperature) = if thinking_enabled(&config.thinking) {
-        (config.thinking.clone(), Some(1.0))
+    // 5. Preserve supported thinking configurations. Budgeted thinking forces
+    // temperature=1.0; adaptive thinking keeps the configured temperature.
+    let thinking = config.thinking.clone().filter(thinking_enabled);
+    let temperature = if thinking
+        .as_ref()
+        .map(thinking_requires_temperature_one)
+        .unwrap_or(false)
+    {
+        Some(1.0)
     } else {
-        (None, config.temperature)
+        config.temperature
     };
 
     // 6. Tools — cache the full tool-definitions prefix via the last tool.
@@ -268,9 +277,15 @@ fn translate_user(msg: &ChatMessage, cache_enabled: bool) -> AnthropicMessage {
                     }
                     ContentBlock::ImageUrl { image_url } => match parse_data_uri(&image_url.url) {
                         Some((media_type, data)) => out.push(AnthropicContentBlock::Image {
-                            source: AnthropicImageSource { type_: "base64", media_type, data },
+                            source: AnthropicMediaSource { type_: "base64", media_type, data },
                         }),
                         None => log::warn!("[Anthropic] Skipping non-data-URI image"),
+                    },
+                    ContentBlock::VideoUrl { video_url } => match parse_data_uri(&video_url.url) {
+                        Some((media_type, data)) => out.push(AnthropicContentBlock::Video {
+                            source: AnthropicMediaSource { type_: "base64", media_type, data },
+                        }),
+                        None => log::warn!("[Anthropic] Skipping non-data-URI video"),
                     },
                 }
             }
@@ -355,10 +370,17 @@ fn set_block_cache_control(block: &mut AnthropicContentBlock, cc: Option<CacheCo
     }
 }
 
-fn thinking_enabled(thinking: &Option<Value>) -> bool {
+fn thinking_enabled(thinking: &Value) -> bool {
+    match thinking.get("type").and_then(|value| value.as_str()) {
+        Some("disabled") => false,
+        Some("adaptive" | "enabled") => true,
+        _ => thinking_requires_temperature_one(thinking),
+    }
+}
+
+fn thinking_requires_temperature_one(thinking: &Value) -> bool {
     thinking
-        .as_ref()
-        .and_then(|v| v.get("budget_tokens"))
+        .get("budget_tokens")
         .and_then(|b| b.as_u64())
         .map(|n| n > 0)
         .unwrap_or(false)
@@ -740,6 +762,15 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_thinking_is_preserved() {
+        let mut c = cfg();
+        c.thinking = Some(json!({"type": "adaptive"}));
+        let req = build_anthropic_request(&[user("hi")], &[], &c);
+        assert_eq!(req.temperature, Some(0.5));
+        assert_eq!(req.thinking, Some(json!({"type": "adaptive"})));
+    }
+
+    #[test]
     fn no_thinking_passes_temperature_through() {
         let req = build_anthropic_request(&[user("hi")], &[], &cfg());
         assert_eq!(req.temperature, Some(0.5));
@@ -760,6 +791,25 @@ mod tests {
                 assert_eq!(source.type_, "base64");
             }
             other => panic!("expected image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn video_data_uri_to_base64_source() {
+        let msg = ChatMessage::user_with_media(vec![
+            ContentBlock::Text { text: "watch".into(), cache_control: None },
+            ContentBlock::VideoUrl {
+                video_url: VideoUrlContent { url: "data:video/mp4;base64,QUJD".into(), detail: None },
+            },
+        ]);
+        let req = build_anthropic_request(&[msg], &[], &cfg());
+        match &req.messages[0].content[1] {
+            AnthropicContentBlock::Video { source } => {
+                assert_eq!(source.media_type, "video/mp4");
+                assert_eq!(source.data, "QUJD");
+                assert_eq!(source.type_, "base64");
+            }
+            other => panic!("expected video, got {other:?}"),
         }
     }
 

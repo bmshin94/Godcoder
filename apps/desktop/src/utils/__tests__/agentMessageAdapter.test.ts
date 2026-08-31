@@ -39,6 +39,22 @@ describe('buildAgentMessage', () => {
     expect(msg.artifacts).toHaveLength(1);
     expect(msg.artifacts[0].id).toBe('art-1');
   });
+
+  it('preserves image and video attachments', () => {
+    const msg = buildAgentMessage(
+      'msg-media',
+      '',
+      'user',
+      'thread-1',
+      'agent-42',
+      undefined,
+      undefined,
+      ['data:image/png;base64,AA=='],
+      ['data:video/mp4;base64,AA=='],
+    );
+    expect(msg.images).toHaveLength(1);
+    expect(msg.videos).toHaveLength(1);
+  });
 });
 
 describe('buildChatPanelMessage', () => {

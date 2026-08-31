@@ -85,8 +85,8 @@ pub struct AttachmentPayload {
     pub media_type: String,
 }
 
-async fn fetch_image_as_base64(url: &str, media_type: &str) -> String {
-    // Local attachments (pasted/picked images) arrive as data: URLs already
+async fn fetch_attachment_as_data_url(url: &str, media_type: &str) -> String {
+    // Local attachments arrive as data: URLs already
     // base64-encoded by the frontend — pass them through untouched.
     if url.starts_with("data:") {
         return url.to_string();
@@ -109,35 +109,45 @@ async fn fetch_image_as_base64(url: &str, media_type: &str) -> String {
 }
 
 async fn build_user_message(text: &str, attachments: Option<Vec<AttachmentPayload>>) -> ChatMessage {
-    let image_attachments: Vec<&AttachmentPayload> = attachments
+    let media_attachments: Vec<&AttachmentPayload> = attachments
         .as_ref()
-        .map(|atts| atts.iter().filter(|a| a.media_type.starts_with("image/")).collect())
+        .map(|atts| {
+            atts.iter()
+                .filter(|a| {
+                    a.media_type.starts_with("image/") || a.media_type.starts_with("video/")
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
-    if image_attachments.is_empty() {
+    if media_attachments.is_empty() {
         return ChatMessage::user(text);
     }
 
-    use agent::llm::types::{ContentBlock, ImageUrlContent};
+    use agent::llm::types::{ContentBlock, ImageUrlContent, VideoUrlContent};
     let mut blocks = vec![ContentBlock::Text { text: text.to_string(), cache_control: None }];
-    for att in image_attachments {
-        let data_url = fetch_image_as_base64(&att.url, &att.media_type).await;
-        blocks.push(ContentBlock::ImageUrl {
-            image_url: ImageUrlContent { url: data_url, detail: Some("auto".to_string()) },
-        });
+    for att in media_attachments {
+        let data_url = fetch_attachment_as_data_url(&att.url, &att.media_type).await;
+        if att.media_type.starts_with("video/") {
+            blocks.push(ContentBlock::VideoUrl {
+                video_url: VideoUrlContent { url: data_url, detail: None },
+            });
+        } else {
+            blocks.push(ContentBlock::ImageUrl {
+                image_url: ImageUrlContent { url: data_url, detail: Some("auto".to_string()) },
+            });
+        }
     }
-    ChatMessage::user_with_images(blocks)
+    ChatMessage::user_with_media(blocks)
 }
 
 // ── Providers (endpoints) + model selections ────────────────────────────────
 
-/// A saved LLM provider = an *endpoint* (no model bundled). Persisted as a JSON
-/// array under `llm_providers`. `kind` maps to a wire format:
-/// openai/openai_compatible → OpenAI; anthropic → Anthropic. OpenAI and Anthropic
-/// are built-in singletons (ids "openai"/"anthropic"); openai_compatible can be added.
-/// Per-model metadata discovered from a provider's `/models` endpoint or edited
-/// by the user. Optional & defaulted so older stored providers deserialize.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// A saved LLM provider is an endpoint plus its available models. Persisted as
+/// a JSON array under `llm_providers`. `kind` identifies the UI provider, while
+/// `wire_format` can select a protocol for curated presets. Optional fields are
+/// defaulted so older stored providers continue to deserialize.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelMeta {
     /// Discovered context length (e.g. OpenRouter `context_length`). `None` =
@@ -147,13 +157,25 @@ pub struct ModelMeta {
     /// Whether this model accepts image inputs.
     #[serde(default)]
     pub supports_images: bool,
+    /// Whether this model accepts video inputs.
+    #[serde(default)]
+    pub supports_videos: bool,
+    /// Thinking modes supported by this model.
+    #[serde(default)]
+    pub thinking: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
     pub id: String,
     pub kind: String,
+    /// Optional wire-format override for curated presets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_format: Option<String>,
+    /// Built-in presets are editable but cannot be deleted.
+    #[serde(default)]
+    pub builtin: bool,
     /// Display name (shown for openai_compatible providers; built-ins use their kind name).
     #[serde(default)]
     pub label: String,
@@ -170,18 +192,21 @@ pub struct ProviderConfig {
     /// no per-model flag. Built-ins resolve vision from the model registry instead.
     #[serde(default)]
     pub supports_images: bool,
+    /// Provider-level video fallback for custom providers.
+    #[serde(default)]
+    pub supports_videos: bool,
 }
 
 impl ProviderConfig {
     fn provider(&self) -> Provider {
-        match self.kind.as_str() {
-            "anthropic" => Provider::Anthropic,
+        match self.wire_format.as_deref().unwrap_or(self.kind.as_str()) {
+            "messages" | "anthropic" => Provider::Anthropic,
             _ => Provider::OpenAI,
         }
     }
 
     fn is_builtin(&self) -> bool {
-        self.kind == "openai" || self.kind == "anthropic"
+        self.builtin || self.kind == "openai" || self.kind == "anthropic"
     }
 }
 
@@ -210,27 +235,72 @@ pub struct ModelSelection {
 const PROVIDERS_KEY: &str = "llm_providers";
 const SELECTION_KEY: &str = "llm_selection";
 
+fn minimax_model_meta() -> std::collections::HashMap<String, ModelMeta> {
+    let mut meta = std::collections::HashMap::new();
+    meta.insert(
+        "MiniMax-M3".to_string(),
+        ModelMeta {
+            context_length: Some(1_000_000),
+            supports_images: true,
+            supports_videos: true,
+            thinking: vec!["adaptive".to_string(), "disabled".to_string()],
+        },
+    );
+    meta.insert(
+        "MiniMax-M2.7".to_string(),
+        ModelMeta {
+            context_length: Some(204_800),
+            supports_images: false,
+            supports_videos: false,
+            thinking: vec!["always_on".to_string()],
+        },
+    );
+    meta
+}
+
+fn minimax_provider(id: &str, label: &str, base_url: &str, wire_format: &str) -> ProviderConfig {
+    ProviderConfig {
+        id: id.to_string(),
+        kind: "minimax".to_string(),
+        wire_format: Some(wire_format.to_string()),
+        builtin: true,
+        label: label.to_string(),
+        base_url: base_url.to_string(),
+        api_key: String::new(),
+        models: vec!["MiniMax-M3".to_string(), "MiniMax-M2.7".to_string()],
+        model_meta: minimax_model_meta(),
+        supports_images: false,
+        supports_videos: false,
+    }
+}
+
 fn default_providers() -> Vec<ProviderConfig> {
     vec![
         ProviderConfig {
             id: "openai".to_string(),
             kind: "openai".to_string(),
+            wire_format: None,
+            builtin: true,
             label: String::new(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             models: Vec::new(),
             model_meta: std::collections::HashMap::new(),
             supports_images: false,
+            supports_videos: false,
         },
         ProviderConfig {
             id: "anthropic".to_string(),
             kind: "anthropic".to_string(),
+            wire_format: None,
+            builtin: true,
             label: String::new(),
             base_url: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             models: Vec::new(),
             model_meta: std::collections::HashMap::new(),
             supports_images: false,
+            supports_videos: false,
         },
         // Local Qwen2.5-Coder default coding agent, served by Ollama over its
         // OpenAI-compatible endpoint (http://localhost:11434/v1). Ollama is the
@@ -244,6 +314,8 @@ fn default_providers() -> Vec<ProviderConfig> {
         ProviderConfig {
             id: "qwen-local".to_string(),
             kind: "ollama".to_string(),
+            wire_format: None,
+            builtin: false,
             label: "Qwen2.5-Coder (local)".to_string(),
             base_url: "http://localhost:11434/v1".to_string(),
             api_key: "ollama".to_string(),
@@ -252,18 +324,57 @@ fn default_providers() -> Vec<ProviderConfig> {
                 let mut m = std::collections::HashMap::new();
                 m.insert(
                     "qwen2.5-coder:7b-instruct".to_string(),
-                    ModelMeta { context_length: Some(32_768), supports_images: false },
+                    ModelMeta {
+                        context_length: Some(32_768),
+                        supports_images: false,
+                        supports_videos: false,
+                        thinking: Vec::new(),
+                    },
                 );
                 m
             },
             supports_images: false,
+            supports_videos: false,
         },
+        minimax_provider(
+            "minimax-global-chat",
+            "MiniMax Global (Chat)",
+            "https://api.minimax.io/v1",
+            "chat",
+        ),
+        minimax_provider(
+            "minimax-global-messages",
+            "MiniMax Global (Messages)",
+            "https://api.minimax.io/anthropic",
+            "messages",
+        ),
+        minimax_provider(
+            "minimax-cn-chat",
+            "MiniMax China (Chat)",
+            "https://api.minimaxi.com/v1",
+            "chat",
+        ),
+        minimax_provider(
+            "minimax-cn-messages",
+            "MiniMax China (Messages)",
+            "https://api.minimaxi.com/anthropic",
+            "messages",
+        ),
     ]
 }
 
-/// Read saved providers. Always guarantees the built-in OpenAI + Anthropic rows
-/// exist (self-heals older stores that predate one of them), keeping built-ins
-/// first in a stable order, then user-added OpenAI-compatible providers.
+fn merge_builtin(existing: &ProviderConfig, mut builtin: ProviderConfig) -> ProviderConfig {
+    if !builtin.builtin {
+        return existing.clone();
+    }
+    builtin.base_url = existing.base_url.clone();
+    builtin.api_key = existing.api_key.clone();
+    builtin.models = existing.models.clone();
+    builtin
+}
+
+/// Read saved providers. Always guarantees the built-in rows exist, keeping
+/// their canonical capabilities while preserving user-editable connection data.
 fn read_providers(app_state: &AppState) -> Vec<ProviderConfig> {
     let stored: Vec<ProviderConfig> = app_state
         .db
@@ -277,7 +388,11 @@ fn read_providers(app_state: &AppState) -> Vec<ProviderConfig> {
     let mut changed = false;
     for builtin in default_providers() {
         match stored.iter().find(|p| p.id == builtin.id) {
-            Some(existing) => list.push(existing.clone()),
+            Some(existing) => {
+                let merged = merge_builtin(existing, builtin);
+                changed |= &merged != existing;
+                list.push(merged);
+            }
             None => {
                 list.push(builtin);
                 changed = true;
@@ -313,6 +428,86 @@ fn read_selection(app_state: &AppState) -> ModelSelection {
 fn write_selection(app_state: &AppState, sel: &ModelSelection) -> Result<(), String> {
     let raw = serde_json::to_string(sel).map_err(|e| e.to_string())?;
     app_state.db.set_setting(SELECTION_KEY, &raw)
+}
+
+#[cfg(test)]
+mod provider_preset_tests {
+    use super::*;
+    use agent::llm::MessageContent;
+
+    #[test]
+    fn minimax_presets_cover_regions_and_wire_formats() {
+        let providers = default_providers();
+        let expected = [
+            ("minimax-global-chat", "https://api.minimax.io/v1", "chat", Provider::OpenAI),
+            (
+                "minimax-global-messages",
+                "https://api.minimax.io/anthropic",
+                "messages",
+                Provider::Anthropic,
+            ),
+            ("minimax-cn-chat", "https://api.minimaxi.com/v1", "chat", Provider::OpenAI),
+            (
+                "minimax-cn-messages",
+                "https://api.minimaxi.com/anthropic",
+                "messages",
+                Provider::Anthropic,
+            ),
+        ];
+
+        for (id, base_url, wire_format, provider) in expected {
+            let preset = providers.iter().find(|candidate| candidate.id == id).unwrap();
+            assert!(preset.builtin);
+            assert_eq!(preset.kind, "minimax");
+            assert_eq!(preset.base_url, base_url);
+            assert_eq!(preset.wire_format.as_deref(), Some(wire_format));
+            assert_eq!(preset.provider(), provider);
+            assert_eq!(preset.models, ["MiniMax-M3", "MiniMax-M2.7"]);
+        }
+    }
+
+    #[test]
+    fn minimax_presets_include_canonical_model_capabilities() {
+        let provider = default_providers()
+            .into_iter()
+            .find(|candidate| candidate.id == "minimax-global-chat")
+            .unwrap();
+
+        let m3 = provider.model_meta.get("MiniMax-M3").unwrap();
+        assert_eq!(m3.context_length, Some(1_000_000));
+        assert!(m3.supports_images);
+        assert!(m3.supports_videos);
+        assert_eq!(m3.thinking, ["adaptive", "disabled"]);
+
+        let m27 = provider.model_meta.get("MiniMax-M2.7").unwrap();
+        assert_eq!(m27.context_length, Some(204_800));
+        assert!(!m27.supports_images);
+        assert!(!m27.supports_videos);
+        assert_eq!(m27.thinking, ["always_on"]);
+
+        let config = provider_to_llm_config(&provider, "MiniMax-M3");
+        assert_eq!(config.thinking, Some(serde_json::json!({ "type": "adaptive" })));
+    }
+
+    #[tokio::test]
+    async fn build_user_message_includes_video_attachments() {
+        let message = build_user_message(
+            "review this",
+            Some(vec![AttachmentPayload {
+                url: "data:video/mp4;base64,QUJD".to_string(),
+                file_name: "clip.mp4".to_string(),
+                media_type: "video/mp4".to_string(),
+            }]),
+        )
+        .await;
+
+        let Some(MessageContent::Blocks(blocks)) = message.content else {
+            panic!("expected media content blocks");
+        };
+        assert!(blocks
+            .iter()
+            .any(|block| matches!(block, agent::llm::ContentBlock::VideoUrl { .. })));
+    }
 }
 
 // ── System Instructions (custom system prompt) ───────────────────────────────
@@ -777,6 +972,12 @@ fn session_model(app_state: &AppState, session: &SessionRow) -> Result<(Provider
 }
 
 pub fn provider_to_llm_config(p: &ProviderConfig, model: &str) -> LlmClientConfig {
+    let thinking = p.model_meta.get(model).and_then(|meta| {
+        meta.thinking
+            .iter()
+            .any(|mode| mode == "adaptive")
+            .then(|| serde_json::json!({ "type": "adaptive" }))
+    });
     LlmClientConfig {
         provider: p.provider(),
         base_url: p.base_url.clone(),
@@ -785,14 +986,14 @@ pub fn provider_to_llm_config(p: &ProviderConfig, model: &str) -> LlmClientConfi
         temperature: None,
         max_completion_tokens: None,
         extra_headers: vec![],
-        thinking: None,
+        thinking,
         disable_cache_control: false,
         policy: Default::default(),
     }
 }
 
 /// Resolved capability for a (provider, model) pair. Single source of truth for
-/// the context bar's tri-state and the image-attach gating on the frontend.
+/// context sizing and attachment gating on the frontend.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCapability {
@@ -800,6 +1001,8 @@ pub struct ModelCapability {
     /// `None` = unknown → show raw token count, auto-compaction disabled.
     pub context_limit: Option<usize>,
     pub supports_images: bool,
+    pub supports_videos: bool,
+    pub thinking: Vec<String>,
     /// "known" (registry) | "discovered" (provider /models) | "unknown".
     pub source: String,
 }
@@ -815,15 +1018,21 @@ async fn resolve_capability(
         return ModelCapability {
             context_limit: Some(p.context_window),
             supports_images: p.supports_images,
+            supports_videos: p.supports_videos,
+            thinking: p.thinking.clone(),
             source: "known".into(),
         };
     }
     let meta = provider.model_meta.get(model);
     let context_limit = meta.and_then(|m| m.context_length);
     let supports_images = meta.map(|m| m.supports_images).unwrap_or(false) || provider.supports_images;
+    let supports_videos = meta.map(|m| m.supports_videos).unwrap_or(false) || provider.supports_videos;
+    let thinking = meta.map(|m| m.thinking.clone()).unwrap_or_default();
     ModelCapability {
         context_limit,
         supports_images,
+        supports_videos,
+        thinking,
         source: if context_limit.is_some() { "discovered".into() } else { "unknown".into() },
     }
 }
@@ -835,10 +1044,12 @@ async fn resolve_capability(
 pub struct CuratedModel {
     pub id: String,
     pub display_name: String,
-    /// "openai" | "anthropic" — matches the built-in provider `kind`.
+    /// Matches the built-in provider `kind`.
     pub provider: String,
     pub context_window: usize,
     pub supports_images: bool,
+    pub supports_videos: bool,
+    pub thinking: Vec<String>,
 }
 
 /// List the built-in model registry — the single source of truth for the
@@ -855,6 +1066,8 @@ pub async fn agent_list_models(agent_state: State<'_, AgentState>) -> Result<Vec
             provider: p.provider.clone(),
             context_window: p.context_window,
             supports_images: p.supports_images,
+            supports_videos: p.supports_videos,
+            thinking: p.thinking.clone(),
         })
         .collect())
 }
@@ -1195,6 +1408,8 @@ pub struct AgentDisplayMessage {
     pub duration_seconds: u32,
     /// Image data-URLs attached to this message (rebuilt from on-disk refs).
     pub images: Vec<String>,
+    /// Video data-URLs attached to this message (rebuilt from on-disk refs).
+    pub videos: Vec<String>,
 }
 
 /// Pull a short, human-friendly summary out of a tool call's JSON arguments.
@@ -2087,16 +2302,15 @@ pub async fn agent_get_messages(
         if (msg.role != "user" && msg.role != "assistant") || msg.type_ != "text" {
             continue;
         }
-        // Extract text + image data-URLs (handles multimodal block arrays, which
-        // a bare `content.as_str()` would miss — silently dropping image messages).
-        let (text, images) =
+        // Extract text plus media data-URLs from multimodal block arrays.
+        let (text, images, videos) =
             crate::agent_bridge::db::extract_display_content(&msg.llm_message, &msg.session_id);
         let text = if msg.role == "assistant" {
             sanitize_assistant_display_text(&text)
         } else {
             text
         };
-        if text.is_empty() && images.is_empty() {
+        if text.is_empty() && images.is_empty() && videos.is_empty() {
             if msg.role == "user" {
                 pending_tools.clear();
                 pending_started = None;
@@ -2124,6 +2338,7 @@ pub async fn agent_get_messages(
             tools,
             duration_seconds,
             images,
+            videos,
         });
     }
     Ok(out)

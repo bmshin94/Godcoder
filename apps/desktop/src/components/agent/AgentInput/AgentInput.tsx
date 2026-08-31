@@ -40,8 +40,12 @@ function isImage(name: string): boolean {
   return /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(name);
 }
 
-/** Infer an image MIME type from a filename. Files built from raw bytes have an
- * empty `type`, which the backend's `image/*` filter would drop. */
+function isVideo(name: string): boolean {
+  return /\.(mp4|avi|mov|mkv)$/i.test(name);
+}
+
+/** Infer a media MIME type from a filename. Files built from raw bytes have an
+ * empty `type`, which the backend's media filter would drop. */
 function mimeFromName(name: string): string {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
@@ -53,6 +57,10 @@ function mimeFromName(name: string): string {
     svg: "image/svg+xml",
     bmp: "image/bmp",
     ico: "image/x-icon",
+    mp4: "video/mp4",
+    avi: "video/x-msvideo",
+    mov: "video/mov",
+    mkv: "video/x-matroska",
   };
   return map[ext] ?? "";
 }
@@ -109,6 +117,8 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
   const tokenUsage = useAppStore((s) => s.tokenUsage[sessionId]);
   // Vision capability for the active model gates the image-attach affordances.
   const supportsImages = useAppStore((s) => s.activeCapability?.supportsImages ?? false);
+  const supportsVideos = useAppStore((s) => s.activeCapability?.supportsVideos ?? false);
+  const canAttach = supportsImages || supportsVideos;
   const [dragActive, setDragActive] = useState(false);
 
   // Load git-tracked files for @ picker.
@@ -363,7 +373,7 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
   // Convert a local file to a data: URL attachment (no upload server).
   const trackAttachment = useCallback(async (file: File) => {
     const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const mediaType = file.type || "application/octet-stream";
+    const mediaType = file.type || mimeFromName(file.name) || "application/octet-stream";
     setAttachments((prev) => [...prev, { id, file, file_name: file.name, uploading: true }]);
     try {
       const dataUrl = await fileToDataUrl(file);
@@ -384,24 +394,29 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
   }, []);
 
   const handleUploadClick = useCallback(async () => {
+    const filters = [];
+    if (supportsImages) {
+      filters.push({ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"] });
+    }
+    if (supportsVideos) {
+      filters.push({ name: "Videos", extensions: ["mp4", "avi", "mov", "mkv"] });
+    }
     const selected = await open({
       directory: false,
       multiple: true,
-      title: "Select images",
-      // Only images are supported (the backend forwards image/* attachments only).
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"] }],
+      title: supportsImages && supportsVideos ? "Select images or videos" : supportsVideos ? "Select videos" : "Select images",
+      filters,
     });
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
     for (const filePath of paths) {
       const fileName = filePath.split("/").pop() || filePath;
-      // Guard against a non-image slipping through (e.g. the OS "All Files" override).
-      if (!isImage(fileName)) continue;
+      // Guard against an unsupported file slipping through the OS picker.
+      if (!(supportsImages && isImage(fileName)) && !(supportsVideos && isVideo(fileName))) continue;
       try {
         const bytes = await invoke<number[]>("read_file_bytes", { path: filePath }).catch(() => null);
         if (bytes) {
-          // NOTE: File created from raw bytes has no MIME type, so file.type is "".
-          // Infer it from the extension so the backend's image/* filter keeps it.
+          // File created from raw bytes has no MIME type, so infer it here.
           const file = new File([new Uint8Array(bytes)], fileName, { type: mimeFromName(fileName) });
           await trackAttachment(file);
         }
@@ -409,13 +424,13 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
         /* ignore */
       }
     }
-  }, [trackAttachment]);
+  }, [supportsImages, supportsVideos, trackAttachment]);
 
   const removeAttachment = (id: string) => setAttachments((prev) => prev.filter((a) => a.id !== id));
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      // Only intercept pasted images when the active model supports vision.
+      // Clipboard media support is currently limited to images.
       if (!supportsImages) return;
       const items = e.clipboardData?.items;
       if (!items) return;
@@ -438,22 +453,27 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragActive(false);
-      if (!supportsImages) return;
+      if (!canAttach) return;
       const files = Array.from(e.dataTransfer?.files ?? []);
       for (const file of files) {
-        if (file.type.startsWith("image/") || isImage(file.name)) trackAttachment(file);
+        if (
+          (supportsImages && (file.type.startsWith("image/") || isImage(file.name))) ||
+          (supportsVideos && (file.type.startsWith("video/") || isVideo(file.name)))
+        ) {
+          trackAttachment(file);
+        }
       }
     },
-    [trackAttachment, supportsImages],
+    [canAttach, supportsImages, supportsVideos, trackAttachment],
   );
 
   const handleDragOver = useCallback(
     (e: React.DragEvent) => {
-      if (!supportsImages) return;
+      if (!canAttach) return;
       e.preventDefault();
       setDragActive(true);
     },
-    [supportsImages],
+    [canAttach],
   );
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
@@ -650,13 +670,12 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
     );
   })();
 
-  // Image attach is the only attachment the backend forwards, so the upload
-  // affordance is shown only when the active model supports vision.
-  const uploadButton = supportsImages ? (
+  const attachmentLabel = supportsImages && supportsVideos ? "media" : supportsVideos ? "video" : "image";
+  const uploadButton = canAttach ? (
     <button
       onClick={handleUploadClick}
       className="p-1.5 rounded-md text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-[var(--hover-bg)]"
-      title="Attach image"
+      title={`Attach ${attachmentLabel}`}
     >
       <Plus className="w-4 h-4" />
     </button>
@@ -753,6 +772,8 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
           >
             {isImage(att.file_name) && att.file.size > 0 ? (
               <img src={URL.createObjectURL(att.file)} alt={att.file_name} className="w-10 h-10 object-cover rounded" />
+            ) : isVideo(att.file_name) && att.file.size > 0 ? (
+              <video src={URL.createObjectURL(att.file)} className="w-10 h-10 object-cover rounded" muted />
             ) : (
               <FileText className="w-5 h-5 text-gray-400 shrink-0" />
             )}
@@ -779,13 +800,13 @@ export default function AgentInput({ sessionId, folderPath, agentName = "the age
     <>
       <div
         className="relative"
-        onDrop={supportsImages ? handleDrop : undefined}
-        onDragOver={supportsImages ? handleDragOver : undefined}
-        onDragLeave={supportsImages ? handleDragLeave : undefined}
+        onDrop={canAttach ? handleDrop : undefined}
+        onDragOver={canAttach ? handleDragOver : undefined}
+        onDragLeave={canAttach ? handleDragLeave : undefined}
       >
         {dragActive && (
           <div className="absolute inset-0 z-20 m-5 rounded-xl border-2 border-dashed border-blue-400 bg-blue-50/70 dark:bg-blue-500/10 flex items-center justify-center pointer-events-none">
-            <span className="text-sm text-blue-600 dark:text-blue-300">Drop image to attach</span>
+            <span className="text-sm text-blue-600 dark:text-blue-300">Drop {attachmentLabel} to attach</span>
           </div>
         )}
         <InputShell

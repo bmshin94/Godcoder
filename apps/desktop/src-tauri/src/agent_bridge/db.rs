@@ -731,14 +731,14 @@ fn str_to_type(s: &str) -> MessageType {
 /// Reconstruct LLM context from stored messages, applying compaction.
 /// Finds the last compaction record, reads `kept_before_count`, and keeps that
 /// many non-compaction messages before it plus everything after.
-// ── Image persistence (disk-backed attachments) ────────────────────────────
+// ── Media persistence (disk-backed attachments) ────────────────────────────
 //
-// Image bytes are stored on disk under <appdata>/images/<session>/<uuid>.<ext>;
-// the persisted message keeps only a `supercoder-image:<file>` reference so
-// SQLite rows don't bloat with base64. The reference is rebuilt into a data-URL
-// before the message reaches the LLM client (the wire format is unchanged).
+// Media bytes are stored on disk under <appdata>/images/<session>/<uuid>.<ext>;
+// (the directory name is retained for compatibility). Persisted messages keep
+// only a short reference so SQLite rows don't bloat with base64.
 
 const IMAGE_REF_PREFIX: &str = "supercoder-image:";
+const ATTACHMENT_REF_PREFIX: &str = "supercoder-attachment:";
 
 /// On-disk image directory for a session.
 pub fn images_dir(session_id: &str) -> std::path::PathBuf {
@@ -753,6 +753,10 @@ fn ext_for_media(media: &str) -> &'static str {
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
         "image/bmp" => "bmp",
+        "video/mp4" => "mp4",
+        "video/avi" | "video/x-msvideo" => "avi",
+        "video/mov" | "video/quicktime" => "mov",
+        "video/x-matroska" => "mkv",
         _ => "img",
     }
 }
@@ -765,6 +769,10 @@ fn media_for_ext(ext: &str) -> String {
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
         "bmp" => "image/bmp",
+        "mp4" => "video/mp4",
+        "avi" => "video/x-msvideo",
+        "mov" => "video/mov",
+        "mkv" => "video/x-matroska",
         _ => "application/octet-stream",
     }
     .to_string()
@@ -780,14 +788,19 @@ fn parse_data_uri(url: &str) -> Option<(String, String)> {
     Some((media.to_string(), data.to_string()))
 }
 
-/// Replace inline `data:` image URLs with on-disk references before persisting.
+/// Replace inline `data:` media URLs with on-disk references before persisting.
 /// Best-effort: on any IO/parse failure the original data-URL is left inline.
-fn externalize_images(llm_message: &mut serde_json::Value, session_id: &str) {
+fn externalize_attachments(llm_message: &mut serde_json::Value, session_id: &str) {
     let Some(blocks) = llm_message.get_mut("content").and_then(|c| c.as_array_mut()) else {
         return;
     };
     for block in blocks {
-        let url = match block.get("image_url").and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
+        let field = match block.get("type").and_then(|t| t.as_str()) {
+            Some("image_url") => "image_url",
+            Some("video_url") => "video_url",
+            _ => continue,
+        };
+        let url = match block.get(field).and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
             Some(u) if u.starts_with("data:") => u.to_string(),
             _ => continue,
         };
@@ -804,53 +817,65 @@ fn externalize_images(llm_message: &mut serde_json::Value, session_id: &str) {
         if std::fs::write(dir.join(&file), &bytes).is_err() {
             continue;
         }
-        block["image_url"]["url"] = serde_json::Value::String(format!("{IMAGE_REF_PREFIX}{file}"));
+        block[field]["url"] = serde_json::Value::String(format!("{ATTACHMENT_REF_PREFIX}{file}"));
     }
 }
 
-/// Rebuild `data:` image URLs from on-disk references before the message is used.
+/// Rebuild `data:` media URLs from on-disk references before the message is used.
 /// Legacy inline data-URLs pass through untouched; missing files are left as-is.
-fn inline_images(llm_message: &mut serde_json::Value, session_id: &str) {
+fn inline_attachments(llm_message: &mut serde_json::Value, session_id: &str) {
     let Some(blocks) = llm_message.get_mut("content").and_then(|c| c.as_array_mut()) else {
         return;
     };
     for block in blocks {
-        let file = match block.get("image_url").and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
-            Some(u) => match u.strip_prefix(IMAGE_REF_PREFIX) {
-                Some(f) => f.to_string(),
-                None => continue,
-            },
+        let field = match block.get("type").and_then(|t| t.as_str()) {
+            Some("image_url") => "image_url",
+            Some("video_url") => "video_url",
+            _ => continue,
+        };
+        let file = match block.get(field).and_then(|i| i.get("url")).and_then(|u| u.as_str()) {
+            Some(u) => u
+                .strip_prefix(ATTACHMENT_REF_PREFIX)
+                .or_else(|| u.strip_prefix(IMAGE_REF_PREFIX))
+                .map(|f| f.to_string())
+                .unwrap_or_default(),
             None => continue,
         };
+        if file.is_empty() {
+            continue;
+        }
         let path = images_dir(session_id).join(&file);
         let Ok(bytes) = std::fs::read(&path) else { continue };
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let ext = std::path::Path::new(&file).extension().and_then(|e| e.to_str()).unwrap_or("img");
         let data_url = format!("data:{};base64,{}", media_for_ext(ext), encoded);
-        block["image_url"]["url"] = serde_json::Value::String(data_url);
+        block[field]["url"] = serde_json::Value::String(data_url);
     }
 }
 
-/// Extract the display text and image data-URLs from a stored `llm_message` JSON.
+/// Extract display text plus image and video data-URLs from a stored message.
 /// Handles both plain-string content and the multimodal block array (text +
-/// image_url). On-disk image refs are rebuilt into data-URLs so the UI can show
-/// them. Used by the message-list command to render images in the chat bubble.
-pub fn extract_display_content(llm_message_json: &str, session_id: &str) -> (String, Vec<String>) {
+/// media URLs). On-disk refs are rebuilt before returning them to the UI.
+pub fn extract_display_content(
+    llm_message_json: &str,
+    session_id: &str,
+) -> (String, Vec<String>, Vec<String>) {
     let mut val: serde_json::Value =
         serde_json::from_str(llm_message_json).unwrap_or(serde_json::json!({}));
-    inline_images(&mut val, session_id);
+    inline_attachments(&mut val, session_id);
 
     let content = &val["content"];
     if let Some(s) = content.as_str() {
-        return (s.to_string(), Vec::new());
+        return (s.to_string(), Vec::new(), Vec::new());
     }
     let Some(blocks) = content.as_array() else {
-        return (String::new(), Vec::new());
+        return (String::new(), Vec::new(), Vec::new());
     };
 
     let mut text = String::new();
     let mut images = Vec::new();
+    let mut videos = Vec::new();
     for block in blocks {
         match block.get("type").and_then(|t| t.as_str()) {
             Some("text") => {
@@ -867,10 +892,19 @@ pub fn extract_display_content(llm_message_json: &str, session_id: &str) -> (Str
                     images.push(u.to_string());
                 }
             }
+            Some("video_url") => {
+                if let Some(u) = block
+                    .get("video_url")
+                    .and_then(|i| i.get("url"))
+                    .and_then(|u| u.as_str())
+                {
+                    videos.push(u.to_string());
+                }
+            }
             _ => {}
         }
     }
-    (text, images)
+    (text, images, videos)
 }
 
 pub fn reconstruct_context(stored: Vec<StoredMessage>) -> Vec<AgentMessage> {
@@ -909,8 +943,8 @@ pub fn reconstruct_context(stored: Vec<StoredMessage>) -> Vec<AgentMessage> {
 fn stored_to_agent_message(stored: StoredMessage) -> AgentMessage {
     let mut llm_message: serde_json::Value =
         serde_json::from_str(&stored.llm_message).unwrap_or(serde_json::json!({}));
-    // Rebuild any disk-backed image references into data-URLs before the LLM sees them.
-    inline_images(&mut llm_message, &stored.session_id);
+    // Rebuild any disk-backed attachment references before the LLM sees them.
+    inline_attachments(&mut llm_message, &stored.session_id);
     let metadata: serde_json::Value =
         serde_json::from_str(&stored.metadata).unwrap_or(serde_json::json!({}));
     let content = llm_message["content"].as_str().unwrap_or("").to_string();
@@ -966,9 +1000,9 @@ impl MessagePersister for SqliteMessagePersister {
         let role = role_to_str(message.role).to_string();
         let type_ = type_to_str(message.message_type).to_string();
         let turn_count = message.turn_count;
-        // Externalize inline image bytes to disk, keeping only a reference in SQLite.
+        // Externalize inline media bytes to disk, keeping only a reference in SQLite.
         let mut llm_value = message.llm_message.clone();
-        externalize_images(&mut llm_value, session_id);
+        externalize_attachments(&mut llm_value, session_id);
         let llm_message = serde_json::to_string(&llm_value)
             .map_err(|e| PersistError::Storage(e.to_string()))?;
         let metadata = serde_json::to_string(&message.metadata)
